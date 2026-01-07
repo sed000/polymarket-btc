@@ -1,6 +1,6 @@
 import { Trader } from "./trader";
 import { findEligibleMarkets, fetchBtc15MinMarkets, analyzeMarket, type EligibleMarket, type Market, type PriceOverride } from "./scanner";
-import { insertTrade, closeTrade, getOpenTrades, type Trade } from "./db";
+import { insertTrade, closeTrade, getOpenTrades, getLastClosedTrade, type Trade } from "./db";
 import { getPriceStream, type PriceStream } from "./websocket";
 
 const PROFIT_TARGET = 0.99; // Auto-sell at $0.99 for profit
@@ -91,7 +91,8 @@ export class Bot {
         stopLoss: 0.40,
         timeWindowMs: 15 * 60 * 1000,  // Full 15 min market duration
         stopLossDelayMs: 0,  // No delay for super-risk - immediate stop-loss
-        maxSpread: 0.05  // Allow wider spreads for volatile entries
+        maxSpread: 0.05,  // Allow wider spreads for volatile entries
+        minRiskReward: 0.5  // Reward must be at least 50% of risk (max entry ~$0.79)
       };
     }
     return {
@@ -100,7 +101,8 @@ export class Bot {
       stopLoss: this.config.stopLoss,
       timeWindowMs: this.config.timeWindowMs,
       stopLossDelayMs: this.config.stopLossDelayMs,
-      maxSpread: this.config.maxSpread
+      maxSpread: this.config.maxSpread,
+      minRiskReward: 0  // No risk/reward filter for normal mode
     };
   }
 
@@ -562,6 +564,27 @@ export class Bot {
     if (spread > activeConfig.maxSpread) {
       this.log(`Skipping: spread $${spread.toFixed(2)} > max $${activeConfig.maxSpread.toFixed(2)}`);
       return;
+    }
+
+    // Risk/reward ratio check - ensure potential profit justifies the risk
+    const potentialReward = PROFIT_TARGET - askPrice;  // e.g., 0.99 - 0.71 = 0.28
+    const potentialRisk = askPrice - activeConfig.stopLoss;  // e.g., 0.71 - 0.40 = 0.31
+    const riskRewardRatio = potentialReward / potentialRisk;  // e.g., 0.28 / 0.31 = 0.90
+
+    if (riskRewardRatio < activeConfig.minRiskReward) {
+      this.log(`Skipping: risk/reward ${riskRewardRatio.toFixed(2)} < min ${activeConfig.minRiskReward} (risk $${potentialRisk.toFixed(2)}, reward $${potentialReward.toFixed(2)})`);
+      return;
+    }
+
+    // Super-risk mode: Only enter OPPOSITE side of last closed trade IN THE SAME MARKET
+    // This prevents chasing the same direction after it already moved
+    // But allows fresh entries in new markets
+    if (this.config.riskMode === "super-risk") {
+      const lastTrade = getLastClosedTrade();
+      if (lastTrade && lastTrade.market_slug === market.slug && lastTrade.side === side) {
+        this.log(`Skipping: must trade opposite side in same market (last was ${lastTrade.side})`);
+        return;
+      }
     }
 
     const modeLabel = this.config.riskMode === "super-risk" ? "[SUPER-RISK] " : "";

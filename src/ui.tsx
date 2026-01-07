@@ -14,9 +14,11 @@ function Header({ state, config }: { state: BotState; config: BotConfig }) {
 
   // Get active config values based on risk mode
   const activeEntry = isSuperRisk ? 0.70 : config.entryThreshold;
-  const activeMaxEntry = isSuperRisk ? 0.95 : config.maxEntryPrice;
   const activeStop = isSuperRisk ? 0.40 : config.stopLoss;
   const activeDelay = isSuperRisk ? 0 : config.stopLossDelayMs;
+  // For super-risk, max entry is limited by risk/reward ratio (0.5 min)
+  // Formula: entry <= (0.99 + 0.5 * stopLoss) / 1.5 = ~0.79 for stopLoss=0.40
+  const activeMaxEntry = isSuperRisk ? 0.79 : config.maxEntryPrice;
 
   return (
     <Box flexDirection="column" borderStyle="single" borderColor={borderColor} paddingX={1}>

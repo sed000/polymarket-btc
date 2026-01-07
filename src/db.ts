@@ -109,3 +109,8 @@ export function getTradeStats() {
     winRate: closedTrades > 0 ? (wins.count / closedTrades) * 100 : 0
   };
 }
+
+export function getLastClosedTrade(): Trade | null {
+  const stmt = db.prepare("SELECT * FROM trades WHERE status != 'OPEN' ORDER BY closed_at DESC LIMIT 1");
+  return stmt.get() as Trade | null;
+}
