@@ -102,7 +102,7 @@ export class Bot {
       timeWindowMs: this.config.timeWindowMs,
       stopLossDelayMs: this.config.stopLossDelayMs,
       maxSpread: this.config.maxSpread,
-      minRiskReward: 0  // No risk/reward filter for normal mode
+      minRiskReward: 0.25  // Reward must be at least 25% of risk (allows up to ~$0.95)
     };
   }
 
@@ -576,15 +576,13 @@ export class Bot {
       return;
     }
 
-    // Super-risk mode: Only enter OPPOSITE side of last closed trade IN THE SAME MARKET
+    // Only enter OPPOSITE side of last closed trade IN THE SAME MARKET
     // This prevents chasing the same direction after it already moved
     // But allows fresh entries in new markets
-    if (this.config.riskMode === "super-risk") {
-      const lastTrade = getLastClosedTrade();
-      if (lastTrade && lastTrade.market_slug === market.slug && lastTrade.side === side) {
-        this.log(`Skipping: must trade opposite side in same market (last was ${lastTrade.side})`);
-        return;
-      }
+    const lastTrade = getLastClosedTrade();
+    if (lastTrade && lastTrade.market_slug === market.slug && lastTrade.side === side) {
+      this.log(`Skipping: must trade opposite side in same market (last was ${lastTrade.side})`);
+      return;
     }
 
     const modeLabel = this.config.riskMode === "super-risk" ? "[SUPER-RISK] " : "";
