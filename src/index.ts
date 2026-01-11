@@ -28,8 +28,41 @@ const config: BotConfig = {
   compoundLimit: parseFloat(process.env.COMPOUND_LIMIT || "0"),
   baseBalance: parseFloat(process.env.BASE_BALANCE || "10"),
   signatureType: parseInt(process.env.SIGNATURE_TYPE || "1") as 0 | 1 | 2,
-  funderAddress: process.env.FUNDER_ADDRESS
+  funderAddress: process.env.FUNDER_ADDRESS,
+  maxPositions: parseInt(process.env.MAX_POSITIONS || "1")
 };
+
+// Validate configuration to catch invalid env vars early
+function validateConfig(config: BotConfig): void {
+  const errors: string[] = [];
+
+  if (isNaN(config.entryThreshold) || config.entryThreshold < 0 || config.entryThreshold > 1) {
+    errors.push("ENTRY_THRESHOLD must be a number between 0 and 1");
+  }
+  if (isNaN(config.stopLoss) || config.stopLoss < 0 || config.stopLoss > 1) {
+    errors.push("STOP_LOSS must be a number between 0 and 1");
+  }
+  if (isNaN(config.maxEntryPrice) || config.maxEntryPrice < 0 || config.maxEntryPrice > 1) {
+    errors.push("MAX_ENTRY_PRICE must be a number between 0 and 1");
+  }
+  if (config.stopLoss >= config.entryThreshold) {
+    errors.push("STOP_LOSS must be less than ENTRY_THRESHOLD");
+  }
+  if (isNaN(config.paperBalance) || config.paperBalance < 0) {
+    errors.push("PAPER_BALANCE must be a positive number");
+  }
+  if (isNaN(config.maxPositions) || config.maxPositions < 1) {
+    errors.push("MAX_POSITIONS must be at least 1");
+  }
+
+  if (errors.length > 0) {
+    console.error("Configuration errors:");
+    errors.forEach(e => console.error(`  - ${e}`));
+    process.exit(1);
+  }
+}
+
+validateConfig(config);
 
 async function main() {
   console.log("Initializing Polymarket BTC Bot...\n");
@@ -37,8 +70,9 @@ async function main() {
   // Initialize database based on mode
   initDatabase(config.paperTrading, config.riskMode);
 
-  // In paper trading mode, PRIVATE_KEY is optional
-  const privateKey = PRIVATE_KEY || "0x0000000000000000000000000000000000000000000000000000000000000001";
+  // In paper trading mode, use a placeholder key (no real transactions)
+  // For real trading, PRIVATE_KEY is validated at startup
+  const privateKey = PRIVATE_KEY || "paper-trading-mode";
 
   const bot = new Bot(privateKey, config, () => {
     // Logs are handled by UI
