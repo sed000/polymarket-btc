@@ -10,13 +10,19 @@ interface AppProps {
 
 function Header({ state, config }: { state: BotState; config: BotConfig }) {
   const isSuperRisk = config.riskMode === "super-risk";
-  const borderColor = isSuperRisk ? "magenta" : state.paperTrading ? "yellow" : "cyan";
+  const isDynamicRisk = config.riskMode === "dynamic-risk";
+  const borderColor = isDynamicRisk ? "blue" : isSuperRisk ? "magenta" : state.paperTrading ? "yellow" : "cyan";
 
   // Get active config values based on risk mode
-  const activeEntry = isSuperRisk ? 0.70 : config.entryThreshold;
-  const activeMaxEntry = isSuperRisk ? 0.95 : config.maxEntryPrice;
-  const activeStop = isSuperRisk ? 0.40 : config.stopLoss;
-  const activeDelay = isSuperRisk ? 0 : config.stopLossDelayMs;
+  // Claude-mode: dynamic entry threshold based on consecutive losses
+  const dynamicBaseThreshold = 0.70;
+  const dynamicLossAdjustment = Math.min(state.consecutiveLosses * 0.05, 0.15);
+  const dynamicThreshold = dynamicBaseThreshold + dynamicLossAdjustment;
+
+  const activeEntry = isDynamicRisk ? dynamicThreshold : isSuperRisk ? 0.70 : config.entryThreshold;
+  const activeMaxEntry = isDynamicRisk ? 0.95 : isSuperRisk ? 0.95 : config.maxEntryPrice;
+  const activeStop = isDynamicRisk ? "dynamic" : isSuperRisk ? 0.40 : config.stopLoss;
+  const activeDelay = isDynamicRisk ? 2000 : isSuperRisk ? 0 : config.stopLossDelayMs;
 
   return (
     <Box flexDirection="column" borderStyle="single" borderColor={borderColor} paddingX={1}>
@@ -27,6 +33,9 @@ function Header({ state, config }: { state: BotState; config: BotConfig }) {
         <Box gap={2}>
           {isSuperRisk && (
             <Text color="magenta" bold>SUPER-RISK</Text>
+          )}
+          {isDynamicRisk && (
+            <Text color="blue" bold>DYNAMIC</Text>
           )}
           <Text color={state.wsConnected ? "green" : "yellow"}>
             {state.wsConnected ? "WS" : "REST"}
@@ -52,10 +61,17 @@ function Header({ state, config }: { state: BotState; config: BotConfig }) {
         {state.savedProfit > 0 && (
           <Text>Saved: <Text color="cyan">${state.savedProfit.toFixed(2)}</Text></Text>
         )}
-        <Text>Entry: <Text color={isSuperRisk ? "magenta" : "yellow"}>${activeEntry.toFixed(2)}-{activeMaxEntry.toFixed(2)}</Text></Text>
-        <Text>Stop: <Text color="red">≤${activeStop.toFixed(2)}</Text></Text>
+        <Text>Entry: <Text color={isDynamicRisk ? "blue" : isSuperRisk ? "magenta" : "yellow"}>${activeEntry.toFixed(2)}-{activeMaxEntry.toFixed(2)}</Text></Text>
+        <Text>Stop: <Text color="red">{isDynamicRisk ? "32.5%" : `≤$${activeStop.toFixed(2)}`}</Text></Text>
         {activeDelay > 0 && <Text>Delay: <Text color="cyan">{activeDelay / 1000}s</Text></Text>}
         <Text>Pos: <Text color="cyan">{state.positions.size}</Text></Text>
+        {isDynamicRisk && (
+          <Text>
+            Streak: <Text color={state.consecutiveLosses > 0 ? "red" : "green"}>
+              {state.consecutiveLosses > 0 ? `L${state.consecutiveLosses}` : `W${state.consecutiveWins}`}
+            </Text>
+          </Text>
+        )}
       </Box>
     </Box>
   );
@@ -112,7 +128,8 @@ function PositionsTable({ state, config }: { state: BotState; config: BotConfig 
 
   // Get active stop-loss based on risk mode
   const isSuperRisk = config.riskMode === "super-risk";
-  const stopLoss = isSuperRisk ? 0.40 : config.stopLoss;
+  const isDynamicRisk = config.riskMode === "dynamic-risk";
+  const defaultStopLoss = isSuperRisk ? 0.40 : config.stopLoss;
   const profitTarget = 0.99;
 
   return (
@@ -123,6 +140,7 @@ function PositionsTable({ state, config }: { state: BotState; config: BotConfig 
           <Box width={6}><Text color="gray">Side</Text></Box>
           <Box width={8}><Text color="gray">Entry</Text></Box>
           <Box width={8}><Text color="gray">Shares</Text></Box>
+          <Box width={8}><Text color="gray">Stop</Text></Box>
           <Box width={10}><Text color="gray">Win</Text></Box>
           <Box width={10}><Text color="gray">Loss</Text></Box>
         </Box>
@@ -130,6 +148,8 @@ function PositionsTable({ state, config }: { state: BotState; config: BotConfig 
           <Text color="gray">No open positions</Text>
         ) : (
           positions.map((p, i) => {
+            // Use dynamic stop-loss if available (dynamic-risk), else use default
+            const stopLoss = p.dynamicStopLoss || defaultStopLoss;
             const potentialWin = (profitTarget - p.entryPrice) * p.shares;
             const potentialLoss = (p.entryPrice - stopLoss) * p.shares;
             return (
@@ -142,6 +162,9 @@ function PositionsTable({ state, config }: { state: BotState; config: BotConfig 
                 </Box>
                 <Box width={8}>
                   <Text>{p.shares.toFixed(1)}</Text>
+                </Box>
+                <Box width={8}>
+                  <Text color="red">${stopLoss.toFixed(2)}</Text>
                 </Box>
                 <Box width={10}>
                   <Text color="green">+${potentialWin.toFixed(2)}</Text>
