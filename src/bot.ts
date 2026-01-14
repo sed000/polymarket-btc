@@ -25,6 +25,9 @@ export interface BotConfig {
   signatureType: SignatureType; // 0=EOA, 1=Poly Proxy (Magic.link), 2=Gnosis Safe
   funderAddress?: string;  // Proxy wallet address (required for signature type 1)
   maxPositions: number;    // e.g., 1 - max concurrent positions (prevents excessive risk)
+  // Uncertainty detection: exit early when market becomes 50-50
+  uncertaintyThreshold: number; // e.g., 0.55 - below this, market is uncertain
+  uncertaintyExit: boolean;     // Enable uncertainty exit for existing positions
 }
 
 export interface Position {
@@ -139,7 +142,9 @@ export class Bot {
         timeWindowMs: 15 * 60 * 1000,  // Full 15 min market duration
         stopLossDelayMs: 0,  // No delay - execute immediately when stop triggers
         maxSpread: 0.05,
-        maxDrawdownPercent: 0.40  // 40% max loss per trade (was 32.5%)
+        maxDrawdownPercent: 0.40,  // 40% max loss per trade (was 32.5%)
+        uncertaintyThreshold: this.config.uncertaintyThreshold,
+        uncertaintyExit: this.config.uncertaintyExit
       };
     }
     return {
@@ -180,6 +185,8 @@ export class Bot {
     this.priceStream.onPrice(async (update) => {
       // Real-time stop-loss check (await to prevent race conditions)
       await this.checkStopLossRealtime(update.tokenId, update.bestBid);
+      // Real-time uncertainty exit check (await to prevent race conditions)
+      await this.checkUncertaintyExitRealtime(update.tokenId, update.bestBid, update.bestAsk);
       // Real-time entry check (await to prevent race conditions)
       await this.checkEntryRealtime(update.tokenId, update.bestBid, update.bestAsk);
     });
@@ -862,6 +869,142 @@ export class Bot {
   }
 
   /**
+   * Real-time uncertainty exit check triggered by WebSocket price updates
+   * Exits position early when market becomes 50-50 (both sides near $0.50)
+   * This prevents getting caught in volatile whipsaw markets
+   */
+  private async checkUncertaintyExitRealtime(tokenId: string, bestBid: number, bestAsk: number): Promise<void> {
+    // Only check if bot is running, trading enabled, and uncertainty exit enabled
+    if (!this.state.running || !this.state.tradingEnabled) return;
+    if (!this.config.uncertaintyExit) return;
+
+    const position = this.state.positions.get(tokenId);
+    if (!position) return;
+
+    const activeConfig = this.getActiveConfig();
+    const uncertaintyThreshold = activeConfig.uncertaintyThreshold || 0.55;
+
+    // Find the opposite side's price
+    // If we hold UP, we need to check DOWN's price, and vice versa
+    const market = this.state.markets.find(m => m.clobTokenIds.includes(tokenId));
+    if (!market) return;
+
+    const isUpToken = market.clobTokenIds[0] === tokenId;
+    const oppositeTokenId = isUpToken ? market.clobTokenIds[1] : market.clobTokenIds[0];
+    const oppositePrice = this.priceStream.getPrice(oppositeTokenId);
+
+    if (!oppositePrice) return;
+
+    // Market is "uncertain" when BOTH sides are below threshold
+    // This means neither UP nor DOWN is clearly winning
+    // e.g., UP=$0.52, DOWN=$0.48 → both < 0.55 → uncertain
+    const ourSidePrice = bestBid;  // What we can sell for
+    const oppositeSidePrice = oppositePrice.bestBid;  // What opposite side sells for
+
+    // Check if both sides are below uncertainty threshold (approaching 50-50)
+    if (ourSidePrice < uncertaintyThreshold && oppositeSidePrice < uncertaintyThreshold) {
+      // Market is too close to call - exit early before potential stop-loss
+      // Only exit if current price is still profitable or at break-even
+      // (we don't want to exit at a worse price than stop-loss would give us)
+      const effectiveStopLoss = position.dynamicStopLoss || activeConfig.stopLoss;
+
+      // Only trigger uncertainty exit if price is ABOVE stop-loss
+      // (otherwise let stop-loss handle it)
+      if (ourSidePrice > effectiveStopLoss) {
+        this.log(`[UNCERTAINTY] Market approaching 50-50: ${position.side}=$${ourSidePrice.toFixed(2)}, opposite=$${oppositeSidePrice.toFixed(2)}`);
+        await this.executeUncertaintyExit(tokenId, position, ourSidePrice);
+      }
+    }
+  }
+
+  /**
+   * Execute uncertainty exit (sell position early when market becomes 50-50)
+   */
+  private async executeUncertaintyExit(tokenId: string, position: Position, currentBid: number): Promise<void> {
+    // MUTEX: Prevent concurrent exits for same token
+    if (this.state.pendingExits.has(tokenId)) {
+      return;
+    }
+
+    // Validate position has shares
+    if (!position.shares || position.shares < 0.01) {
+      this.log(`[UNCERTAINTY] Invalid position with 0 shares - removing`);
+      closeTrade(position.tradeId, 0, "RESOLVED");
+      this.state.positions.delete(tokenId);
+      return;
+    }
+
+    this.state.pendingExits.add(tokenId);
+
+    try {
+      this.log(`[UNCERTAINTY] Early exit triggered for ${position.side} @ $${currentBid.toFixed(2)} (market too close to 50-50)`);
+
+      if (this.config.paperTrading) {
+        // Paper trading: simulate sell at bid price
+        const exitPrice = currentBid;
+        const proceeds = exitPrice * position.shares;
+        closeTrade(position.tradeId, exitPrice, "UNCERTAINTY");
+        this.state.positions.delete(tokenId);
+        this.state.balance += proceeds;
+        const pnl = (exitPrice - position.entryPrice) * position.shares;
+        this.log(`[PAPER] Sold ${position.shares.toFixed(2)} shares @ $${exitPrice.toFixed(2)}. PnL: $${pnl.toFixed(2)}`);
+
+        // Track as loss if negative PnL
+        if (pnl < 0) {
+          this.state.consecutiveLosses++;
+          this.state.consecutiveWins = 0;
+          if (this.config.riskMode === "dynamic-risk") {
+            const newThreshold = Math.min(0.70 + this.state.consecutiveLosses * 0.05, 0.85);
+            this.log(`[DYNAMIC] Loss streak: ${this.state.consecutiveLosses} | Entry threshold now: $${newThreshold.toFixed(2)}`);
+          }
+        } else {
+          this.state.consecutiveWins++;
+          this.state.consecutiveLosses = 0;
+        }
+
+        this.checkCompoundLimit();
+      } else {
+        // Real trading: cancel limit order then market sell
+        try {
+          if (position.limitOrderId) {
+            await this.trader.cancelOrder(position.limitOrderId);
+            this.log(`Cancelled limit order`);
+          }
+
+          const result = await this.trader.marketSell(tokenId, position.shares);
+          if (result) {
+            closeTrade(position.tradeId, result.price, "UNCERTAINTY");
+            this.state.positions.delete(tokenId);
+            const pnl = (result.price - position.entryPrice) * position.shares;
+            this.log(`Closed position @ $${result.price.toFixed(2)}. PnL: $${pnl.toFixed(2)}`);
+
+            // Track win/loss
+            if (pnl < 0) {
+              this.state.consecutiveLosses++;
+              this.state.consecutiveWins = 0;
+              if (this.config.riskMode === "dynamic-risk") {
+                const newThreshold = Math.min(0.70 + this.state.consecutiveLosses * 0.05, 0.85);
+                this.log(`[DYNAMIC] Loss streak: ${this.state.consecutiveLosses} | Entry threshold now: $${newThreshold.toFixed(2)}`);
+              }
+            } else {
+              this.state.consecutiveWins++;
+              this.state.consecutiveLosses = 0;
+            }
+
+            // Sync balance after exit
+            this.state.balance = await this.trader.getBalance();
+          }
+        } catch (err) {
+          this.log(`Error executing uncertainty exit: ${err}`);
+        }
+      }
+    } finally {
+      // MUTEX: Always release the lock
+      this.state.pendingExits.delete(tokenId);
+    }
+  }
+
+  /**
    * Real-time entry check triggered by WebSocket price updates
    * This fires IMMEDIATELY when prices change to catch entry opportunities
    */
@@ -908,6 +1051,22 @@ export class Bot {
 
     // Don't buy if price is at or above profit target
     if (bestAsk >= this.getProfitTarget()) return;
+
+    // Skip uncertain markets (both sides near $0.50)
+    // This prevents entering when BTC is too close to "price to beat"
+    if (this.config.riskMode === "dynamic-risk" && activeConfig.uncertaintyThreshold) {
+      const oppositeTokenId = isUpToken ? market.clobTokenIds[1] : market.clobTokenIds[0];
+      const oppositePrice = this.priceStream.getPrice(oppositeTokenId);
+
+      if (oppositePrice) {
+        // If both sides are below uncertainty threshold, market is too close to call
+        // e.g., uncertaintyThreshold=0.55, UP=$0.53, DOWN=$0.47 → both < 0.55 → skip
+        if (bestAsk < activeConfig.uncertaintyThreshold && oppositePrice.bestAsk < activeConfig.uncertaintyThreshold) {
+          this.log(`[UNCERTAINTY] Skipping entry: market too close (${side}=$${bestAsk.toFixed(2)}, opposite=$${oppositePrice.bestAsk.toFixed(2)})`);
+          return;
+        }
+      }
+    }
 
     // Build eligible market object for enterPosition
     const marketEndDate = market.endDate instanceof Date ? market.endDate : new Date(market.endDate);

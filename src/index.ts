@@ -29,7 +29,11 @@ const config: BotConfig = {
   baseBalance: parseFloat(process.env.BASE_BALANCE || "10"),
   signatureType: parseInt(process.env.SIGNATURE_TYPE || "1") as 0 | 1 | 2,
   funderAddress: process.env.FUNDER_ADDRESS,
-  maxPositions: parseInt(process.env.MAX_POSITIONS || "1")
+  maxPositions: parseInt(process.env.MAX_POSITIONS || "1"),
+  // Uncertainty detection: exit early when market becomes 50-50
+  // Default: 0.55 threshold (market is uncertain when both UP and DOWN < 0.55)
+  uncertaintyThreshold: parseFloat(process.env.UNCERTAINTY_THRESHOLD || "0.55"),
+  uncertaintyExit: process.env.UNCERTAINTY_EXIT !== "false"  // Enabled by default
 };
 
 // Validate configuration to catch invalid env vars early
@@ -53,6 +57,9 @@ function validateConfig(config: BotConfig): void {
   }
   if (isNaN(config.maxPositions) || config.maxPositions < 1) {
     errors.push("MAX_POSITIONS must be at least 1");
+  }
+  if (isNaN(config.uncertaintyThreshold) || config.uncertaintyThreshold < 0.50 || config.uncertaintyThreshold > 0.70) {
+    errors.push("UNCERTAINTY_THRESHOLD must be between 0.50 and 0.70");
   }
 
   if (errors.length > 0) {

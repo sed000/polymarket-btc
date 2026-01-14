@@ -110,7 +110,7 @@ export function insertTrade(trade: Omit<Trade, "id" | "exit_price" | "pnl" | "cl
   return Number(result.lastInsertRowid);
 }
 
-export function closeTrade(id: number, exitPrice: number, status: "STOPPED" | "RESOLVED"): void {
+export function closeTrade(id: number, exitPrice: number, status: "STOPPED" | "RESOLVED" | "UNCERTAINTY"): void {
   const trade = getTradeById(id);
   if (!trade) return;
 

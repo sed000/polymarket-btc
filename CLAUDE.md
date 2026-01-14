@@ -89,6 +89,8 @@ Environment variables control trading behavior (see `.env.example`):
 - `STOP_LOSS_DELAY_MS` - Confirmation delay before stop-loss
 - `COMPOUND_LIMIT` / `BASE_BALANCE` - Profit taking system
 - `SIGNATURE_TYPE` - 0=EOA, 1=Magic.link proxy, 2=Gnosis Safe
+- `UNCERTAINTY_THRESHOLD` - Price below which market is uncertain (default: 0.55)
+- `UNCERTAINTY_EXIT` - Enable early exit when market becomes 50-50 (default: true)
 
 ### Backtest-Specific Variables
 - `BACKTEST_MODE` - Risk mode for backtesting
@@ -107,7 +109,13 @@ Environment variables control trading behavior (see `.env.example`):
 
 ### Dynamic-Risk Mode Strategy
 - **Adaptive entry threshold**: Base $0.70, increases +$0.05 per consecutive loss (capped at $0.85)
-- **Position-relative stop-loss**: 32.5% max drawdown per trade (calculated from entry price)
+- **Position-relative stop-loss**: 40% max drawdown per trade (`maxDrawdownPercent: 0.40`)
+- **No stop-loss delay**: Immediate execution (0ms) to prevent price crashing during delay
 - **Loss streak tracking**: `consecutiveLosses` / `consecutiveWins` in BotState
 - **Recovery behavior**: Win streak resets threshold to base, preventing "revenge trading"
-- **Stop-loss delay**: 2 seconds (vs 0ms for super-risk)
+
+### Uncertainty Detection (Dynamic-Risk Only)
+- **Entry filter**: Skips entry when market is too close to 50-50 (both UP and DOWN < threshold)
+- **Early exit**: Exits existing positions when market becomes uncertain (before stop-loss triggers)
+- **Config**: `UNCERTAINTY_THRESHOLD` (default: 0.55), `UNCERTAINTY_EXIT` (default: true)
+- **Purpose**: Prevents entering/staying in volatile whipsaw markets where BTC is too close to "price to beat"
