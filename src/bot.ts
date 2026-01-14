@@ -1052,22 +1052,6 @@ export class Bot {
     // Don't buy if price is at or above profit target
     if (bestAsk >= this.getProfitTarget()) return;
 
-    // Skip uncertain markets (both sides near $0.50)
-    // This prevents entering when BTC is too close to "price to beat"
-    if (this.config.riskMode === "dynamic-risk" && activeConfig.uncertaintyThreshold) {
-      const oppositeTokenId = isUpToken ? market.clobTokenIds[1] : market.clobTokenIds[0];
-      const oppositePrice = this.priceStream.getPrice(oppositeTokenId);
-
-      if (oppositePrice) {
-        // If both sides are below uncertainty threshold, market is too close to call
-        // e.g., uncertaintyThreshold=0.55, UP=$0.53, DOWN=$0.47 → both < 0.55 → skip
-        if (bestAsk < activeConfig.uncertaintyThreshold && oppositePrice.bestAsk < activeConfig.uncertaintyThreshold) {
-          this.log(`[UNCERTAINTY] Skipping entry: market too close (${side}=$${bestAsk.toFixed(2)}, opposite=$${oppositePrice.bestAsk.toFixed(2)})`);
-          return;
-        }
-      }
-    }
-
     // Build eligible market object for enterPosition
     const marketEndDate = market.endDate instanceof Date ? market.endDate : new Date(market.endDate);
     const eligibleMarket: EligibleMarket = {
