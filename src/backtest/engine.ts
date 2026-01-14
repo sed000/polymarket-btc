@@ -19,6 +19,11 @@ interface DrawdownPoint {
   drawdown: number;
 }
 
+// Extended position to track dynamic stop-loss
+interface DynamicPosition extends SimulatedPosition {
+  dynamicStopLoss?: number; // Entry-relative stop-loss for dynamic-risk mode
+}
+
 /**
  * Core backtesting engine that simulates trading logic
  * Mirrors the exact behavior from bot.ts
@@ -27,18 +32,23 @@ export class BacktestEngine {
   private config: BacktestConfig;
   private balance: number;
   private savedProfit: number = 0; // Profit taken out via compound limit
-  private position: SimulatedPosition | null = null;
+  private position: DynamicPosition | null = null;
   private trades: BacktestTrade[] = [];
   private equityCurve: EquityPoint[] = [];
   private peakBalance: number;
   private lastTrade: BacktestTrade | null = null;
   private currentMarket: HistoricalMarket | null = null;
+  // Dynamic-risk mode tracking
+  private consecutiveLosses: number = 0;
+  private consecutiveWins: number = 0;
 
   constructor(config: BacktestConfig) {
     this.config = config;
     this.balance = config.startingBalance;
     this.peakBalance = config.startingBalance;
     this.savedProfit = 0;
+    this.consecutiveLosses = 0;
+    this.consecutiveWins = 0;
   }
 
   /**
@@ -150,15 +160,47 @@ export class BacktestEngine {
   }
 
   /**
+   * Get effective stop-loss price for current position
+   * Dynamic-risk mode uses entry-relative stop-loss (32.5% max drawdown)
+   */
+  private getEffectiveStopLoss(): number {
+    if (!this.position) return this.config.stopLoss;
+    
+    // Dynamic-risk mode: use position's dynamic stop-loss if set
+    if (this.config.riskMode === "dynamic-risk" && this.position.dynamicStopLoss) {
+      return this.position.dynamicStopLoss;
+    }
+    
+    // Super-risk and normal modes: use fixed config stop-loss
+    return this.config.stopLoss;
+  }
+
+  /**
+   * Get dynamic entry threshold based on consecutive losses
+   * Mirrors bot.ts dynamic-risk behavior
+   */
+  private getDynamicEntryThreshold(): number {
+    if (this.config.riskMode !== "dynamic-risk") {
+      return this.config.entryThreshold;
+    }
+    
+    // Dynamic entry threshold: Base $0.70, +$0.05 per loss, cap at $0.85
+    const baseThreshold = 0.70;
+    const lossAdjustment = Math.min(this.consecutiveLosses * 0.05, 0.15);
+    return baseThreshold + lossAdjustment;
+  }
+
+  /**
    * Check stop-loss conditions with delay confirmation
    */
   private checkStopLoss(tick: PriceTick): void {
     if (!this.position) return;
 
     const currentBid = tick.bestBid;
+    const effectiveStopLoss = this.getEffectiveStopLoss();
 
     // Check if price is below stop-loss threshold
-    if (currentBid <= this.config.stopLoss) {
+    if (currentBid <= effectiveStopLoss) {
       // First time triggering? Start the timer
       if (!this.position.pendingStopLoss) {
         this.position.pendingStopLoss = {
@@ -210,9 +252,10 @@ export class BacktestEngine {
       return;
     }
 
-    // Check entry threshold
+    // Check entry threshold (use dynamic threshold for dynamic-risk mode)
     const askPrice = tick.bestAsk;
-    if (askPrice < this.config.entryThreshold || askPrice > this.config.maxEntryPrice) {
+    const entryThreshold = this.getDynamicEntryThreshold();
+    if (askPrice < entryThreshold || askPrice > this.config.maxEntryPrice) {
       return;
     }
 
@@ -253,6 +296,13 @@ export class BacktestEngine {
     // Calculate shares
     const shares = this.balance / entryPrice;
 
+    // Calculate dynamic stop-loss for dynamic-risk mode (configurable max drawdown from entry)
+    let dynamicStopLoss: number | undefined;
+    if (this.config.riskMode === "dynamic-risk" && this.config.maxDrawdownPercent > 0) {
+      // Use config value instead of hardcoded 0.325
+      dynamicStopLoss = entryPrice * (1 - this.config.maxDrawdownPercent);
+    }
+
     // Create position
     this.position = {
       tokenId: tick.tokenId,
@@ -261,6 +311,7 @@ export class BacktestEngine {
       shares,
       entryPrice,
       entryTimestamp: tick.timestamp,
+      dynamicStopLoss,
     };
 
     // Deduct from balance
@@ -302,6 +353,15 @@ export class BacktestEngine {
 
     this.trades.push(trade);
     this.lastTrade = trade;
+
+    // Track consecutive wins/losses for dynamic-risk mode
+    if (pnl > 0) {
+      this.consecutiveWins++;
+      this.consecutiveLosses = 0;
+    } else {
+      this.consecutiveLosses++;
+      this.consecutiveWins = 0;
+    }
 
     // Update balance
     const proceeds = finalExitPrice * this.position.shares;

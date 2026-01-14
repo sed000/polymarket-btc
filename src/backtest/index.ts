@@ -1,13 +1,14 @@
 #!/usr/bin/env bun
 import { parseArgs } from "util";
 import type { BacktestConfig } from "./types";
-import { DEFAULT_BACKTEST_CONFIG, SUPER_RISK_CONFIG } from "./types";
+import { DEFAULT_BACKTEST_CONFIG, SUPER_RISK_CONFIG, DYNAMIC_RISK_CONFIG } from "./types";
 import { fetchHistoricalDataset, loadCachedDataset, getCacheStats } from "./data-fetcher";
 import { runBacktest, BacktestEngine } from "./engine";
 import {
   runOptimization,
   getQuickOptimizationRanges,
   getDetailedOptimizationRanges,
+  getDynamicRiskOptimizationRanges,
   compareConfigs,
 } from "./optimizer";
 import {
@@ -42,7 +43,7 @@ COMMANDS:
   run       Run a backtest with specified configuration
   fetch     Fetch historical market data from Polymarket API
   optimize  Find optimal parameters through grid search
-  compare   Compare normal vs super-risk mode
+  compare   Compare normal, super-risk, and dynamic-risk modes
   history   View past backtest runs
   stats     Show cached data statistics
   clear     Clear cached data
@@ -58,26 +59,31 @@ OPTIONS:
   --spread <price>    Max spread (default: 0.03)
   --window <ms>       Time window in ms (default: 300000)
   --balance <amount>  Starting balance (default: 100)
-  --mode <mode>       Risk mode: normal or super-risk
+  --mode <mode>       Risk mode: normal, super-risk, or dynamic-risk
   --quick             Use quick optimization (fewer combinations)
   --force             Force re-fetch data even if cached
   --export <file>     Export results to file (csv or json)
   --limit <n>         Limit output rows
 
+ENVIRONMENT VARIABLES:
+  BACKTEST_MODE                 Risk mode (normal, super-risk, dynamic-risk)
+  BACKTEST_MAX_DRAWDOWN_PERCENT Max drawdown for dynamic-risk (default: 0.50 = 50%)
+  BACKTEST_STOP_LOSS_DELAY_MS   Stop loss delay in ms (default: 5000)
+
 EXAMPLES:
   # Run backtest with default config for last 7 days
   bun run src/backtest/index.ts run --days 7
 
-  # Run backtest with custom parameters
-  bun run src/backtest/index.ts run --entry 0.90 --stop 0.60 --days 14
+  # Run backtest with dynamic-risk mode
+  BACKTEST_MODE=dynamic-risk bun run src/backtest/index.ts run --days 10
 
-  # Fetch historical data
-  bun run src/backtest/index.ts fetch --days 30
+  # Test different drawdown tolerances
+  BACKTEST_MAX_DRAWDOWN_PERCENT=0.60 bun run src/backtest/index.ts run --mode dynamic-risk --days 10
 
-  # Run parameter optimization
-  bun run src/backtest/index.ts optimize --days 14
+  # Run dynamic-risk optimization (tests maxDrawdownPercent 30-70%, delay 0-60s)
+  bun run src/backtest/index.ts optimize --mode dynamic-risk --days 10
 
-  # Compare risk modes
+  # Compare all risk modes
   bun run src/backtest/index.ts compare --days 7
 `;
 
@@ -124,6 +130,7 @@ function getEnvConfig() {
     defaultDays: parseInt(process.env.BACKTEST_DAYS || "7", 10),
     compoundLimit: parseFloat(process.env.BACKTEST_COMPOUND_LIMIT || "0"),
     baseBalance: parseFloat(process.env.BACKTEST_BASE_BALANCE || "10"),
+    maxDrawdownPercent: parseFloat(process.env.BACKTEST_MAX_DRAWDOWN_PERCENT || "0.50"),
   };
 }
 
@@ -139,23 +146,33 @@ function getDateRange(args: ReturnType<typeof parseArguments>["values"]): { star
   return { startDate, endDate };
 }
 
-// Build config from arguments (env config is the base, CLI args override)
+// Build config from arguments (env config is the base, CLI args override, risk mode preset applies)
 function buildConfig(args: ReturnType<typeof parseArguments>["values"], startDate: Date, endDate: Date): BacktestConfig {
   const envConfig = getEnvConfig();
+  const riskMode = (args.mode || envConfig.mode) as "normal" | "super-risk" | "dynamic-risk";
+
+  // Get preset based on risk mode
+  const preset = riskMode === "dynamic-risk"
+    ? DYNAMIC_RISK_CONFIG
+    : riskMode === "super-risk"
+      ? SUPER_RISK_CONFIG
+      : {};
 
   return {
-    entryThreshold: args.entry ? parseFloat(args.entry) : envConfig.entryThreshold,
-    maxEntryPrice: args["max-entry"] ? parseFloat(args["max-entry"]) : envConfig.maxEntryPrice,
-    stopLoss: args.stop ? parseFloat(args.stop) : envConfig.stopLoss,
-    stopLossDelayMs: args.delay ? parseInt(args.delay, 10) : envConfig.stopLossDelayMs,
-    maxSpread: args.spread ? parseFloat(args.spread) : envConfig.maxSpread,
-    timeWindowMs: args.window ? parseInt(args.window, 10) : envConfig.timeWindowMs,
-    profitTarget: envConfig.profitTarget,
+    // Use CLI args > env config > preset > default
+    entryThreshold: args.entry ? parseFloat(args.entry) : (preset.entryThreshold ?? envConfig.entryThreshold),
+    maxEntryPrice: args["max-entry"] ? parseFloat(args["max-entry"]) : (preset.maxEntryPrice ?? envConfig.maxEntryPrice),
+    stopLoss: args.stop ? parseFloat(args.stop) : (preset.stopLoss ?? envConfig.stopLoss),
+    stopLossDelayMs: args.delay ? parseInt(args.delay, 10) : (preset.stopLossDelayMs ?? envConfig.stopLossDelayMs),
+    maxSpread: args.spread ? parseFloat(args.spread) : (preset.maxSpread ?? envConfig.maxSpread),
+    timeWindowMs: args.window ? parseInt(args.window, 10) : (preset.timeWindowMs ?? envConfig.timeWindowMs),
+    profitTarget: preset.profitTarget ?? envConfig.profitTarget,
     startingBalance: args.balance ? parseFloat(args.balance) : envConfig.startingBalance,
     slippage: DEFAULT_BACKTEST_CONFIG.slippage,
     compoundLimit: envConfig.compoundLimit,
     baseBalance: envConfig.baseBalance,
-    riskMode: (args.mode as "normal" | "super-risk") || (envConfig.mode as "normal" | "super-risk"),
+    riskMode,
+    maxDrawdownPercent: preset.maxDrawdownPercent ?? envConfig.maxDrawdownPercent,
     startDate,
     endDate,
   };
@@ -257,10 +274,24 @@ async function commandOptimize(args: ReturnType<typeof parseArguments>["values"]
 
   console.log(`\nOptimizing on ${markets.length} markets...`);
 
-  const ranges = args.quick ? getQuickOptimizationRanges() : getDetailedOptimizationRanges();
+  // Select optimization ranges based on mode
+  const envConfig = getEnvConfig();
+  const riskMode = args.mode || envConfig.mode;
+  let ranges;
+  if (riskMode === "dynamic-risk") {
+    ranges = getDynamicRiskOptimizationRanges();
+    console.log("Using dynamic-risk optimization ranges (maxDrawdownPercent: 30-70%, stopLossDelayMs: 0-60s)");
+  } else if (args.quick) {
+    ranges = getQuickOptimizationRanges();
+  } else {
+    ranges = getDetailedOptimizationRanges();
+  }
+
+  const baseConfig = riskMode === "dynamic-risk" ? { ...DYNAMIC_RISK_CONFIG } : {};
 
   const results = await runOptimization(markets, {
     ranges,
+    baseConfig,
     startDate,
     endDate,
     onProgress: (p) => {
@@ -319,7 +350,24 @@ async function commandCompare(args: ReturnType<typeof parseArguments>["values"])
     riskMode: "super-risk",
   };
 
-  const comparisons = compareConfigs(markets, normalConfig, riskConfig, ["Normal Mode", "Super-Risk Mode"]);
+  const dynamicConfig: BacktestConfig = {
+    ...DEFAULT_BACKTEST_CONFIG,
+    ...DYNAMIC_RISK_CONFIG,
+    startDate,
+    endDate,
+    riskMode: "dynamic-risk",
+  };
+
+  // Run all three configs
+  const engine1 = new BacktestEngine(normalConfig);
+  const engine2 = new BacktestEngine(riskConfig);
+  const engine3 = new BacktestEngine(dynamicConfig);
+
+  const comparisons = [
+    { label: "Normal Mode", result: engine1.run(markets) },
+    { label: "Super-Risk Mode", result: engine2.run(markets) },
+    { label: "Dynamic-Risk Mode", result: engine3.run(markets) },
+  ];
 
   // Print comparison
   printComparisonTable(comparisons);

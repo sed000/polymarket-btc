@@ -61,6 +61,10 @@ export function generateParameterCombinations(
     ? generateValues(ranges.timeWindowMs)
     : [baseConfig.timeWindowMs ?? DEFAULT_BACKTEST_CONFIG.timeWindowMs];
 
+  const maxDrawdownPercents = ranges.maxDrawdownPercent
+    ? generateValues(ranges.maxDrawdownPercent)
+    : [baseConfig.maxDrawdownPercent ?? DEFAULT_BACKTEST_CONFIG.maxDrawdownPercent];
+
   // Generate all combinations
   for (const entryThreshold of entryThresholds) {
     for (const maxEntryPrice of maxEntryPrices) {
@@ -74,15 +78,18 @@ export function generateParameterCombinations(
         for (const stopLossDelayMs of stopLossDelays) {
           for (const maxSpread of maxSpreads) {
             for (const timeWindowMs of timeWindows) {
-              combinations.push({
-                ...baseConfig,
-                entryThreshold,
-                maxEntryPrice,
-                stopLoss,
-                stopLossDelayMs,
-                maxSpread,
-                timeWindowMs,
-              });
+              for (const maxDrawdownPercent of maxDrawdownPercents) {
+                combinations.push({
+                  ...baseConfig,
+                  entryThreshold,
+                  maxEntryPrice,
+                  stopLoss,
+                  stopLossDelayMs,
+                  maxSpread,
+                  timeWindowMs,
+                  maxDrawdownPercent,
+                });
+              }
             }
           }
         }
@@ -136,6 +143,9 @@ export async function runOptimization(
       startingBalance: params.startingBalance ?? DEFAULT_BACKTEST_CONFIG.startingBalance,
       slippage: params.slippage ?? DEFAULT_BACKTEST_CONFIG.slippage,
       riskMode: params.riskMode ?? DEFAULT_BACKTEST_CONFIG.riskMode,
+      compoundLimit: params.compoundLimit ?? DEFAULT_BACKTEST_CONFIG.compoundLimit,
+      baseBalance: params.baseBalance ?? DEFAULT_BACKTEST_CONFIG.baseBalance,
+      maxDrawdownPercent: params.maxDrawdownPercent ?? DEFAULT_BACKTEST_CONFIG.maxDrawdownPercent,
       startDate: options.startDate,
       endDate: options.endDate,
     };
@@ -233,6 +243,22 @@ export function getDetailedOptimizationRanges(): OptimizationRanges {
     stopLossDelayMs: { min: 0, max: 10000, step: 1000 },
     maxSpread: { min: 0.02, max: 0.06, step: 0.02 },
     timeWindowMs: { min: 120000, max: 600000, step: 120000 },
+    maxDrawdownPercent: { min: 0.30, max: 0.60, step: 0.10 },
+  };
+}
+
+/**
+ * Dynamic-risk mode optimization
+ * Tests aggressive drawdown tolerance and longer delays
+ */
+export function getDynamicRiskOptimizationRanges(): OptimizationRanges {
+  return {
+    entryThreshold: { min: 0.70, max: 0.85, step: 0.05 },
+    maxEntryPrice: { min: 0.90, max: 0.95, step: 0.05 },
+    stopLossDelayMs: { min: 0, max: 60000, step: 10000 }, // 0-60 seconds
+    maxDrawdownPercent: { min: 0.30, max: 0.70, step: 0.10 }, // 30-70%
+    maxSpread: { min: 0.03, max: 0.05, step: 0.02 },
+    timeWindowMs: { min: 300000, max: 900000, step: 300000 }, // 5-15 min
   };
 }
 

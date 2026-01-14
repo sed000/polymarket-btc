@@ -134,12 +134,12 @@ export class Bot {
 
       return {
         entryThreshold: dynamicThreshold,
-        maxEntryPrice: 0.95,
+        maxEntryPrice: 0.95,  // Keep original entry range for more opportunities
         stopLoss: 0.40,  // Fallback only - we use dynamic per-position stop
         timeWindowMs: 15 * 60 * 1000,  // Full 15 min market duration
-        stopLossDelayMs: 2000,  // 2s confirmation delay to filter whipsaws
+        stopLossDelayMs: 0,  // No delay - execute immediately when stop triggers
         maxSpread: 0.05,
-        maxDrawdownPercent: 0.325  // 32.5% max loss per trade (dynamic stop-loss)
+        maxDrawdownPercent: 0.40  // 40% max loss per trade (was 32.5%)
       };
     }
     return {

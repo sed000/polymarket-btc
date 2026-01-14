@@ -23,6 +23,9 @@ export interface BacktestConfig {
 
   // Risk mode
   riskMode: RiskMode;
+
+  // Dynamic-risk mode: max drawdown tolerance (0 = use fixed stopLoss)
+  maxDrawdownPercent: number;
 }
 
 // Parameter ranges for optimization
@@ -33,6 +36,7 @@ export interface OptimizationRanges {
   stopLossDelayMs?: { min: number; max: number; step: number };
   maxSpread?: { min: number; max: number; step: number };
   timeWindowMs?: { min: number; max: number; step: number };
+  maxDrawdownPercent?: { min: number; max: number; step: number };
 }
 
 // Historical price tick
@@ -182,9 +186,10 @@ export const DEFAULT_OPTIMIZATION_RANGES: OptimizationRanges = {
   entryThreshold: { min: 0.70, max: 0.96, step: 0.02 },
   maxEntryPrice: { min: 0.92, max: 0.99, step: 0.01 },
   stopLoss: { min: 0.30, max: 0.80, step: 0.05 },
-  stopLossDelayMs: { min: 0, max: 10000, step: 2000 },
+  stopLossDelayMs: { min: 0, max: 60000, step: 10000 }, // 0-60 seconds
   maxSpread: { min: 0.02, max: 0.08, step: 0.02 },
   timeWindowMs: { min: 60000, max: 900000, step: 120000 }, // 1-15 minutes
+  maxDrawdownPercent: { min: 0.30, max: 0.70, step: 0.10 }, // 30-70% for dynamic-risk
 };
 
 // Default backtest config
@@ -201,6 +206,7 @@ export const DEFAULT_BACKTEST_CONFIG: Omit<BacktestConfig, "startDate" | "endDat
   compoundLimit: 0, // Disabled by default
   baseBalance: 10,
   riskMode: "normal",
+  maxDrawdownPercent: 0.50, // 50% drawdown tolerance for dynamic-risk
 };
 
 // Super-risk preset
@@ -212,4 +218,17 @@ export const SUPER_RISK_CONFIG: Partial<BacktestConfig> = {
   maxSpread: 0.05,
   timeWindowMs: 15 * 60 * 1000,
   riskMode: "super-risk",
+  maxDrawdownPercent: 0, // Not used in super-risk (uses fixed stopLoss)
+};
+
+// Dynamic-risk preset - uses entry-relative stop-loss with configurable drawdown tolerance
+export const DYNAMIC_RISK_CONFIG: Partial<BacktestConfig> = {
+  entryThreshold: 0.70,
+  maxEntryPrice: 0.95,
+  stopLoss: 0.40, // Fallback only
+  stopLossDelayMs: 0, // No delay - execute immediately
+  maxSpread: 0.05,
+  timeWindowMs: 15 * 60 * 1000,
+  riskMode: "dynamic-risk",
+  maxDrawdownPercent: 0.40, // 40% drawdown tolerance (was 32.5%)
 };
