@@ -1,0 +1,68 @@
+{
+  "bestStrategy": {
+    "genes": {
+      "entryThreshold": 0.96,
+      "maxEntryPrice": 0.97,
+      "stopLoss": 0.64,
+      "stopLossDelayMs": 1993,
+      "maxSpread": 0.08,
+      "timeWindowMs": 107650,
+      "profitTarget": 0.99
+    },
+    "trainingFitness": 2261.364090458609,
+    "validationFitness": 1869.4220779593743
+  },
+  "inSampleMetrics": {
+    "totalTrades": 43,
+    "wins": 43,
+    "losses": 0,
+    "winRate": 1,
+    "totalPnL": 169.11382118339122,
+    "maxDrawdown": 0,
+    "maxDrawdownPercent": 0,
+    "sharpeRatio": 21.914544481466436,
+    "profitFactor": null,
+    "avgWin": 3.9328795624044472,
+    "avgLoss": 0,
+    "avgTradeReturn": 3.9328795624044472,
+    "maxConsecutiveWins": 43,
+    "maxConsecutiveLosses": 0,
+    "expectancy": 3.9328795624044472,
+    "returnOnCapital": 1.6911382118339122
+  },
+  "outOfSampleMetrics": {
+    "totalTrades": 36,
+    "wins": 36,
+    "losses": 0,
+    "winRate": 1,
+    "totalPnL": 131.31762228575496,
+    "maxDrawdown": 0,
+    "maxDrawdownPercent": 0,
+    "sharpeRatio": 18.010258622758442,
+    "profitFactor": null,
+    "avgWin": 3.6477117301598603,
+    "avgLoss": 0,
+    "avgTradeReturn": 3.6477117301598603,
+    "maxConsecutiveWins": 36,
+    "maxConsecutiveLosses": 0,
+    "expectancy": 3.6477117301598603,
+    "returnOnCapital": 1.3131762228575496
+  },
+  "optimization": {
+    "totalGenerations": 16,
+    "totalEvaluations": 740,
+    "convergedEarly": true,
+    "executionTimeMs": 2585
+  },
+  "config": {
+    "populationSize": 50,
+    "generations": 100,
+    "eliteCount": 5,
+    "mutationRate": 0.15,
+    "crossoverRate": 0.8,
+    "tournamentSize": 5,
+    "convergenceThreshold": 0.001,
+    "convergenceGenerations": 10,
+    "trainingSplit": 0.7
+  }
+}

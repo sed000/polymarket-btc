@@ -5,8 +5,8 @@ import { clobLimiter } from "./rate-limiter";
 const CLOB_API = "https://clob.polymarket.com";
 const CHAIN_ID = 137; // Polygon
 
-// Polymarket minimum order size in shares
-export const MIN_ORDER_SIZE = 5;
+// Polymarket minimum order size in shares (disabled)
+export const MIN_ORDER_SIZE = 0;
 
 // Signature types for different wallet types
 // 0 = EOA (MetaMask direct)
