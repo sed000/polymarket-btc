@@ -241,12 +241,27 @@ function TradesTable({ trades }: { trades: Trade[] }) {
   );
 }
 
-function Logs({ logs }: { logs: string[] }) {
+function Logs({ logs, scrollOffset, autoScroll }: { logs: string[]; scrollOffset: number; autoScroll: boolean }) {
+  const displayCount = 5;
+  // Calculate the slice: if scrollOffset is 0, show the latest 5 logs
+  // if scrollOffset is 1, show logs from -6 to -1, etc.
+  const endIndex = logs.length - scrollOffset;
+  const startIndex = Math.max(0, endIndex - displayCount);
+  const visibleLogs = logs.slice(startIndex, endIndex);
+
   return (
     <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} marginTop={1} height={8}>
-      <Text bold color="white">Activity Log</Text>
+      <Box justifyContent="space-between">
+        <Text bold color="white">Activity Log</Text>
+        {scrollOffset > 0 && (
+          <Text color="yellow">↑{scrollOffset} (press e for latest)</Text>
+        )}
+        {scrollOffset === 0 && !autoScroll && (
+          <Text color="cyan">AUTO</Text>
+        )}
+      </Box>
       <Box flexDirection="column" marginTop={1}>
-        {logs.slice(-5).map((log, i) => (
+        {visibleLogs.map((log, i) => (
           <Text key={i} color="gray" wrap="truncate">{log}</Text>
         ))}
       </Box>
@@ -308,6 +323,8 @@ function Controls() {
     <Box marginTop={1} gap={2}>
       <Text color="gray">[s] Start/Stop</Text>
       <Text color="gray">[r] Refresh</Text>
+      <Text color="gray">[↑/↓] Scroll logs</Text>
+      <Text color="gray">[e] Latest</Text>
       <Text color="gray">[q] Quit</Text>
     </Box>
   );
@@ -319,6 +336,9 @@ function App({ bot }: AppProps) {
   const [wsStats, setWsStats] = useState<WsStats>(bot.getWsStats());
   const [markets, setMarkets] = useState<EligibleMarket[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
+  const [logScrollOffset, setLogScrollOffset] = useState(0);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const logDisplayCount = 5;
 
   const refresh = async () => {
     setState({ ...bot.getState() });
@@ -339,7 +359,14 @@ function App({ bot }: AppProps) {
     return () => clearInterval(interval);
   }, []);
 
-  useInput((input) => {
+  // Reset scroll to bottom when new logs arrive (if auto-scroll is on)
+  useEffect(() => {
+    if (autoScroll) {
+      setLogScrollOffset(0);
+    }
+  }, [state.logs.length, autoScroll]);
+
+  useInput((input, key) => {
     if (input === "q") {
       bot.stop();
       exit();
@@ -352,6 +379,24 @@ function App({ bot }: AppProps) {
       }
     } else if (input === "r") {
       refresh();
+    } else if (key.upArrow) {
+      // Scroll up in logs (increase offset)
+      const maxOffset = Math.max(0, state.logs.length - logDisplayCount);
+      setLogScrollOffset((prev) => Math.min(prev + 1, maxOffset));
+      setAutoScroll(false);
+    } else if (key.downArrow) {
+      // Scroll down in logs (decrease offset)
+      setLogScrollOffset((prev) => {
+        const newOffset = Math.max(0, prev - 1);
+        if (newOffset === 0) {
+          setAutoScroll(true);
+        }
+        return newOffset;
+      });
+    } else if (input === "e") {
+      // Jump to end (latest logs)
+      setLogScrollOffset(0);
+      setAutoScroll(true);
     }
   });
 
@@ -366,7 +411,7 @@ function App({ bot }: AppProps) {
         <Box flexDirection="column" width="50%" marginLeft={1}>
           <TradesTable trades={trades} />
           <WsPanel stats={wsStats} />
-          <Logs logs={state.logs} />
+          <Logs logs={state.logs} scrollOffset={logScrollOffset} autoScroll={autoScroll} />
         </Box>
       </Box>
       <Controls />
