@@ -546,3 +546,176 @@ export function clearHistoricalData(): void {
   database.run("DELETE FROM historical_markets");
   console.log("Historical market data cleared");
 }
+
+// ============================================================================
+// STRATEGY DATABASE
+// ============================================================================
+
+let strategyDb: Database | null = null;
+const STRATEGY_DB_PATH = "strategies.db";
+
+export interface Strategy {
+  id: number;
+  name: string;
+  description: string | null;
+  config_json: string;
+  risk_mode: string;
+  created_at: string;
+  updated_at: string;
+  last_backtest_id: number | null;
+  last_win_rate: number | null;
+  last_total_pnl: number | null;
+  is_active: number;
+}
+
+/**
+ * Initialize the strategy database with required tables
+ */
+export function initStrategyDatabase(): void {
+  if (strategyDb) return;
+
+  strategyDb = new Database(STRATEGY_DB_PATH);
+
+  strategyDb.run(`
+    CREATE TABLE IF NOT EXISTS strategies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT,
+      config_json TEXT NOT NULL,
+      risk_mode TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_backtest_id INTEGER,
+      last_win_rate REAL,
+      last_total_pnl REAL,
+      is_active INTEGER DEFAULT 0
+    )
+  `);
+
+  console.log(`Strategy database initialized: ${STRATEGY_DB_PATH}`);
+}
+
+function ensureStrategyDb(): Database {
+  if (!strategyDb) {
+    initStrategyDatabase();
+  }
+  return strategyDb!;
+}
+
+export function insertStrategy(strategy: {
+  name: string;
+  description?: string;
+  configJson: string;
+  riskMode: string;
+}): number {
+  const database = ensureStrategyDb();
+  const now = new Date().toISOString();
+  const stmt = database.prepare(`
+    INSERT INTO strategies (name, description, config_json, risk_mode, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  const result = stmt.run(
+    strategy.name,
+    strategy.description || null,
+    strategy.configJson,
+    strategy.riskMode,
+    now,
+    now
+  );
+  return Number(result.lastInsertRowid);
+}
+
+export function updateStrategy(
+  id: number,
+  updates: {
+    name?: string;
+    description?: string;
+    configJson?: string;
+    riskMode?: string;
+    lastBacktestId?: number;
+    lastWinRate?: number;
+    lastTotalPnl?: number;
+    isActive?: boolean;
+  }
+): void {
+  const database = ensureStrategyDb();
+  const setParts: string[] = [];
+  const values: any[] = [];
+
+  if (updates.name !== undefined) {
+    setParts.push("name = ?");
+    values.push(updates.name);
+  }
+  if (updates.description !== undefined) {
+    setParts.push("description = ?");
+    values.push(updates.description);
+  }
+  if (updates.configJson !== undefined) {
+    setParts.push("config_json = ?");
+    values.push(updates.configJson);
+  }
+  if (updates.riskMode !== undefined) {
+    setParts.push("risk_mode = ?");
+    values.push(updates.riskMode);
+  }
+  if (updates.lastBacktestId !== undefined) {
+    setParts.push("last_backtest_id = ?");
+    values.push(updates.lastBacktestId);
+  }
+  if (updates.lastWinRate !== undefined) {
+    setParts.push("last_win_rate = ?");
+    values.push(updates.lastWinRate);
+  }
+  if (updates.lastTotalPnl !== undefined) {
+    setParts.push("last_total_pnl = ?");
+    values.push(updates.lastTotalPnl);
+  }
+  if (updates.isActive !== undefined) {
+    setParts.push("is_active = ?");
+    values.push(updates.isActive ? 1 : 0);
+  }
+
+  if (setParts.length === 0) return;
+
+  setParts.push("updated_at = ?");
+  values.push(new Date().toISOString());
+  values.push(id);
+
+  const stmt = database.prepare(`
+    UPDATE strategies SET ${setParts.join(", ")} WHERE id = ?
+  `);
+  stmt.run(...values);
+}
+
+export function deleteStrategy(id: number): void {
+  const database = ensureStrategyDb();
+  const stmt = database.prepare("DELETE FROM strategies WHERE id = ?");
+  stmt.run(id);
+}
+
+export function getStrategy(id: number): Strategy | null {
+  const database = ensureStrategyDb();
+  const stmt = database.prepare("SELECT * FROM strategies WHERE id = ?");
+  return stmt.get(id) as Strategy | null;
+}
+
+export function listStrategies(): Strategy[] {
+  const database = ensureStrategyDb();
+  const stmt = database.prepare("SELECT * FROM strategies ORDER BY updated_at DESC");
+  return stmt.all() as Strategy[];
+}
+
+export function setActiveStrategy(id: number): void {
+  const database = ensureStrategyDb();
+  // First, deactivate all strategies
+  database.run("UPDATE strategies SET is_active = 0");
+  // Then activate the selected one
+  const stmt = database.prepare("UPDATE strategies SET is_active = 1, updated_at = ? WHERE id = ?");
+  stmt.run(new Date().toISOString(), id);
+}
+
+export function getActiveStrategy(): Strategy | null {
+  const database = ensureStrategyDb();
+  const stmt = database.prepare("SELECT * FROM strategies WHERE is_active = 1 LIMIT 1");
+  return stmt.get() as Strategy | null;
+}
