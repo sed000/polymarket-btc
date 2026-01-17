@@ -5,6 +5,8 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun --watch run src/index.ts",
+    "web": "bun run src/web/server.ts",
+    "web:build": "bun run src/web/build.ts",
     "db:real": "sqlite3 -header -column trades_real.db \"SELECT id, substr(market_slug, 1, 25) as market, side, printf('$%.2f', entry_price) as entry, printf('$%.2f', exit_price) as exit, printf('%.1f', shares) as shares, status, printf('$%.2f', pnl) as pnl, substr(created_at, 1, 16) as time FROM trades ORDER BY id DESC LIMIT 20; SELECT ''; SELECT 'TOTAL PnL: $' || printf('%.2f', SUM(pnl)) FROM trades;\"",
     "db:paper": "sqlite3 -header -column trades_paper_normal.db \"SELECT id, substr(market_slug, 1, 25) as market, side, printf('$%.2f', entry_price) as entry, printf('$%.2f', exit_price) as exit, printf('%.1f', shares) as shares, status, printf('$%.2f', pnl) as pnl, substr(created_at, 1, 16) as time FROM trades ORDER BY id DESC LIMIT 20; SELECT ''; SELECT 'TOTAL PnL: $' || printf('%.2f', SUM(pnl)) FROM trades;\"",
     "db:risk": "sqlite3 -header -column trades_paper_risk.db \"SELECT id, substr(market_slug, 1, 25) as market, side, printf('$%.2f', entry_price) as entry, printf('$%.2f', exit_price) as exit, printf('%.1f', shares) as shares, status, printf('$%.2f', pnl) as pnl, substr(created_at, 1, 16) as time FROM trades ORDER BY id DESC LIMIT 20; SELECT ''; SELECT 'TOTAL PnL: $' || printf('%.2f', SUM(pnl)) FROM trades;\"",
@@ -31,11 +33,13 @@
     "ethers": "^5.7.2",
     "ink": "^4.4.1",
     "react": "^18.2.0",
+    "react-dom": "^18.2.0",
     "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
     "@types/ws": "^8.18.1",
     "react-devtools-core": "^7.0.1"
   }

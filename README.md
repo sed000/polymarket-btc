@@ -22,6 +22,8 @@ bun dev
 ### Trading
 - `bun start` - Run the bot
 - `bun dev` - Run with auto-reload
+- `bun run web` - Run the web UI (builds frontend if needed)
+- `bun run web:build` - Build web assets only
 
 ### Database
 - `bun run db:paper` - View paper trading results
@@ -33,6 +35,22 @@ bun dev
 - `bun run backtest:run` - Run backtest
 - `bun run backtest:optimize` - Optimize parameters
 - `bun run backtest:stats` - View backtest statistics
+
+## Web UI
+
+Start the web console with:
+
+```bash
+bun run web
+```
+
+The server defaults to `http://localhost:5175`. You can override the port with:
+
+```bash
+WEB_PORT=8080 bun run web
+```
+
+The UI exposes live trading controls, backtesting workflows, and a strategy builder. Strategy application is limited to paper trading mode for safety.
 
 ## Configuration
 
