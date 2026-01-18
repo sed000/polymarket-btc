@@ -806,23 +806,53 @@ export class Bot {
         if (this.config.paperTrading) {
           // Paper trading: Get actual resolution price from WebSocket
           const wsPrice = this.priceStream.getPrice(tokenId, this.wsPriceMaxAgeMs);
+          let exitPrice: number | null = null;
 
-          // Wait for valid resolution price - must be near $0 (loss) or $1 (win)
-          // Markets resolve binary: winning side = $1, losing side = $0
-          if (!wsPrice || wsPrice.bestBid <= 0) {
-            this.log(`[PAPER] Waiting for resolution price...`);
-            continue;
+          // Check if we have a valid resolution price (near $0 or $1)
+          if (wsPrice && wsPrice.bestBid > 0) {
+            if (wsPrice.bestBid <= 0.05 || wsPrice.bestBid >= 0.95) {
+              exitPrice = wsPrice.bestBid;
+              this.log(`[PAPER] Market resolved @ $${exitPrice.toFixed(2)}`);
+            }
           }
 
-          const exitPrice = wsPrice.bestBid;
+          // If no valid price yet, check how long since market expired
+          if (exitPrice === null) {
+            const expiredMs = now.getTime() - position.marketEndDate.getTime();
+            const expiredMins = Math.floor(expiredMs / 60000);
 
-          // If price is in mid-range, market hasn't resolved yet - wait
-          if (exitPrice > 0.05 && exitPrice < 0.95) {
-            this.log(`[PAPER] Price $${exitPrice.toFixed(2)} - market not yet resolved, waiting...`);
-            continue;
+            // After 2 minutes, try to determine outcome from opposite token
+            if (expiredMs > 2 * 60 * 1000) {
+              // Find the market to get the opposite token
+              const market = this.state.markets.find(m => m.slug === position.marketSlug);
+              if (market && market.clobTokenIds.length >= 2) {
+                const oppositeTokenId = position.side === "UP" ? market.clobTokenIds[1] : market.clobTokenIds[0];
+                const oppositePrice = this.priceStream.getPrice(oppositeTokenId, 30000); // Allow older price
+
+                if (oppositePrice && oppositePrice.bestBid > 0) {
+                  // Binary market: if opposite side is near $1, we lost; if near $0, we won
+                  if (oppositePrice.bestBid >= 0.95) {
+                    exitPrice = 0.00; // We lost
+                    this.log(`[PAPER] Opposite side @ $${oppositePrice.bestBid.toFixed(2)} - we lost`);
+                  } else if (oppositePrice.bestBid <= 0.05) {
+                    exitPrice = 1.00; // We won
+                    this.log(`[PAPER] Opposite side @ $${oppositePrice.bestBid.toFixed(2)} - we won`);
+                  }
+                }
+              }
+
+              // If still no price after 5 minutes, force close as loss (conservative)
+              if (exitPrice === null && expiredMs > 5 * 60 * 1000) {
+                exitPrice = 0.00;
+                this.log(`[PAPER] No resolution after ${expiredMins}m - closing as loss`);
+              }
+            }
+
+            if (exitPrice === null) {
+              this.log(`[PAPER] Waiting for resolution price... (${expiredMins}m since expiry)`);
+              continue;
+            }
           }
-
-          this.log(`[PAPER] Market resolved @ $${exitPrice.toFixed(2)}`);
 
           const proceeds = exitPrice * position.shares;
           const pnl = (exitPrice - position.entryPrice) * position.shares;
