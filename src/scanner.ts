@@ -208,3 +208,58 @@ export function formatTimeRemaining(ms: number): string {
   const secs = Math.floor((ms % 60000) / 1000);
   return `${mins}m ${secs}s`;
 }
+
+/**
+ * Fetch market resolution for a specific market slug
+ * Returns the winning side ("UP" or "DOWN") or null if not resolved
+ */
+export async function fetchMarketResolution(slug: string): Promise<"UP" | "DOWN" | null> {
+  try {
+    await gammaLimiter.acquire();
+    const res = await fetch(`${GAMMA_API}/events?slug=${slug}`);
+    if (!res.ok) return null;
+
+    const events = await res.json();
+    if (!Array.isArray(events) || events.length === 0) return null;
+
+    for (const event of events) {
+      if (!event.markets || !Array.isArray(event.markets)) continue;
+
+      for (const market of event.markets) {
+        // Parse outcomes and prices
+        let outcomes: string[] = [];
+        let outcomePrices: string[] = [];
+
+        if (typeof market.outcomes === 'string') {
+          outcomes = JSON.parse(market.outcomes);
+        } else if (Array.isArray(market.outcomes)) {
+          outcomes = market.outcomes;
+        }
+
+        if (typeof market.outcomePrices === 'string') {
+          outcomePrices = JSON.parse(market.outcomePrices);
+        } else if (Array.isArray(market.outcomePrices)) {
+          outcomePrices = market.outcomePrices;
+        }
+
+        if (outcomes.length < 2 || outcomePrices.length < 2) continue;
+
+        // Find UP and DOWN indices
+        const upIndex = outcomes.findIndex(o => o.toLowerCase() === "up");
+        const downIndex = outcomes.findIndex(o => o.toLowerCase() === "down");
+
+        if (upIndex < 0 || downIndex < 0) continue;
+
+        const upPrice = parseFloat(outcomePrices[upIndex]) || 0;
+        const downPrice = parseFloat(outcomePrices[downIndex]) || 0;
+
+        // Winning side has price ~$1, losing side has price ~$0
+        if (upPrice > 0.9) return "UP";
+        if (downPrice > 0.9) return "DOWN";
+      }
+    }
+  } catch {
+    // Ignore errors
+  }
+  return null;
+}
