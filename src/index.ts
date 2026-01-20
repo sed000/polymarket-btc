@@ -23,7 +23,7 @@ const config: BotConfig = {
   pollIntervalMs: parseInt(process.env.POLL_INTERVAL_MS || "10000"),
   paperTrading,
   paperBalance: parseFloat(process.env.PAPER_BALANCE || "100"),
-  riskMode: (process.env.RISK_MODE || "normal") as "normal" | "super-risk" | "dynamic-risk",
+  riskMode: (process.env.RISK_MODE || "normal") as "normal" | "super-risk" | "dynamic-risk" | "safe",
   compoundLimit: parseFloat(process.env.COMPOUND_LIMIT || "0"),
   baseBalance: parseFloat(process.env.BASE_BALANCE || "10"),
   signatureType: parseInt(process.env.SIGNATURE_TYPE || "1") as 0 | 1 | 2,

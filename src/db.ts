@@ -9,8 +9,9 @@ let currentDbPath: string | null = null;
  * - Paper + normal: trades_paper_normal.db
  * - Paper + super-risk: trades_paper_risk.db
  * - Paper + dynamic-risk: trades_paper_dynamic.db
+ * - Paper + safe: trades_paper_safe.db
  */
-export function initDatabase(paperTrading: boolean, riskMode: "normal" | "super-risk" | "dynamic-risk"): void {
+export function initDatabase(paperTrading: boolean, riskMode: "normal" | "super-risk" | "dynamic-risk" | "safe"): void {
   let dbPath: string;
 
   if (!paperTrading) {
@@ -19,6 +20,8 @@ export function initDatabase(paperTrading: boolean, riskMode: "normal" | "super-
     dbPath = "trades_paper_risk.db";
   } else if (riskMode === "dynamic-risk") {
     dbPath = "trades_paper_dynamic.db";
+  } else if (riskMode === "safe") {
+    dbPath = "trades_paper_safe.db";
   } else {
     dbPath = "trades_paper_normal.db";
   }

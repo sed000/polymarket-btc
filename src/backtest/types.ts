@@ -204,3 +204,14 @@ export const SUPER_RISK_CONFIG: Partial<BacktestConfig> = {
   timeWindowMs: 15 * 60 * 1000,
   riskMode: "super-risk",
 };
+
+// Safe preset - conservative with tight stop-loss
+export const SAFE_CONFIG: Partial<BacktestConfig> = {
+  entryThreshold: 0.95,
+  maxEntryPrice: 0.98,
+  stopLoss: 0.90,
+  profitTarget: 0.98,
+  maxSpread: 0.03,
+  timeWindowMs: 5 * 60 * 1000,
+  riskMode: "safe",
+};

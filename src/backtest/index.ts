@@ -174,7 +174,7 @@ function buildConfig(args: ReturnType<typeof parseArguments>["values"], startDat
     slippage: DEFAULT_BACKTEST_CONFIG.slippage,
     compoundLimit: envConfig.compoundLimit,
     baseBalance: envConfig.baseBalance,
-    riskMode: (args.mode as "normal" | "super-risk") || (envConfig.mode as "normal" | "super-risk"),
+    riskMode: (args.mode as "normal" | "super-risk" | "safe") || (envConfig.mode as "normal" | "super-risk" | "safe"),
     startDate,
     endDate,
   };

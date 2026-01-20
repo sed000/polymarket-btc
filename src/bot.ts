@@ -7,7 +7,7 @@ import { getPriceStream, UserStream, type MarketEvent, type PriceStream, type Us
 const PROFIT_TARGET_NORMAL = 0.99;      // Conservative: sell at $0.99
 const PROFIT_TARGET_AGGRESSIVE = 0.98;  // Super-risk & Dynamic-risk: sell at $0.98
 
-export type RiskMode = "normal" | "super-risk" | "dynamic-risk";
+export type RiskMode = "normal" | "super-risk" | "dynamic-risk" | "safe";
 
 export interface BotConfig {
   entryThreshold: number;  // e.g., 0.95
@@ -117,7 +117,7 @@ export class Bot {
    * Get profit target based on risk mode
    */
   private getProfitTarget(): number {
-    if (this.config.riskMode === "super-risk" || this.config.riskMode === "dynamic-risk") {
+    if (this.config.riskMode === "super-risk" || this.config.riskMode === "dynamic-risk" || this.config.riskMode === "safe") {
       return PROFIT_TARGET_AGGRESSIVE; // $0.98
     }
     return PROFIT_TARGET_NORMAL; // $0.99
@@ -129,6 +129,16 @@ export class Bot {
    * DYNAMIC-RISK uses dynamic entry threshold and entry-relative stop-loss
    */
   private getActiveConfig() {
+    if (this.config.riskMode === "safe") {
+      return {
+        entryThreshold: 0.95,
+        maxEntryPrice: 0.98,
+        stopLoss: 0.90,
+        timeWindowMs: 5 * 60 * 1000,  // Standard 5 min window
+        maxSpread: 0.03,  // Conservative spread
+        maxDrawdownPercent: 0  // Not used in safe (uses fixed stopLoss)
+      };
+    }
     if (this.config.riskMode === "super-risk") {
       return {
         entryThreshold: 0.70,

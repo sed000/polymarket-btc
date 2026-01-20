@@ -11,7 +11,8 @@ interface AppProps {
 function Header({ state, config }: { state: BotState; config: BotConfig }) {
   const isSuperRisk = config.riskMode === "super-risk";
   const isDynamicRisk = config.riskMode === "dynamic-risk";
-  const borderColor = isDynamicRisk ? "blue" : isSuperRisk ? "magenta" : state.paperTrading ? "yellow" : "cyan";
+  const isSafe = config.riskMode === "safe";
+  const borderColor = isDynamicRisk ? "blue" : isSuperRisk ? "magenta" : isSafe ? "green" : state.paperTrading ? "yellow" : "cyan";
 
   // Get active config values based on risk mode
   // Claude-mode: dynamic entry threshold based on consecutive losses
@@ -19,9 +20,9 @@ function Header({ state, config }: { state: BotState; config: BotConfig }) {
   const dynamicLossAdjustment = Math.min(state.consecutiveLosses * 0.05, 0.15);
   const dynamicThreshold = dynamicBaseThreshold + dynamicLossAdjustment;
 
-  const activeEntry = isDynamicRisk ? dynamicThreshold : isSuperRisk ? 0.70 : config.entryThreshold;
-  const activeMaxEntry = isDynamicRisk ? 0.95 : isSuperRisk ? 0.95 : config.maxEntryPrice;
-  const activeStop = isDynamicRisk ? "dynamic" : isSuperRisk ? 0.40 : config.stopLoss;
+  const activeEntry = isDynamicRisk ? dynamicThreshold : isSuperRisk ? 0.70 : isSafe ? 0.95 : config.entryThreshold;
+  const activeMaxEntry = isDynamicRisk ? 0.95 : isSuperRisk ? 0.95 : isSafe ? 0.98 : config.maxEntryPrice;
+  const activeStop = isDynamicRisk ? "dynamic" : isSuperRisk ? 0.40 : isSafe ? 0.90 : config.stopLoss;
 
   return (
     <Box flexDirection="column" borderStyle="single" borderColor={borderColor} paddingX={1}>
@@ -30,6 +31,9 @@ function Header({ state, config }: { state: BotState; config: BotConfig }) {
           POLYMARKET BTC 15-MIN BOT {state.paperTrading && "[PAPER]"}
         </Text>
         <Box gap={2}>
+          {isSafe && (
+            <Text color="green" bold>SAFE</Text>
+          )}
           {isSuperRisk && (
             <Text color="magenta" bold>SUPER-RISK</Text>
           )}
@@ -65,7 +69,7 @@ function Header({ state, config }: { state: BotState; config: BotConfig }) {
         {state.savedProfit > 0 && (
           <Text>Saved: <Text color="cyan">${state.savedProfit.toFixed(2)}</Text></Text>
         )}
-        <Text>Entry: <Text color={isDynamicRisk ? "blue" : isSuperRisk ? "magenta" : "yellow"}>${activeEntry.toFixed(2)}-{activeMaxEntry.toFixed(2)}</Text></Text>
+        <Text>Entry: <Text color={isDynamicRisk ? "blue" : isSuperRisk ? "magenta" : isSafe ? "green" : "yellow"}>${activeEntry.toFixed(2)}-{activeMaxEntry.toFixed(2)}</Text></Text>
         <Text>Stop: <Text color="red">{isDynamicRisk ? "32.5%" : `≤$${activeStop.toFixed(2)}`}</Text></Text>
         <Text>Pos: <Text color="cyan">{state.positions.size}</Text></Text>
         {isDynamicRisk && (
