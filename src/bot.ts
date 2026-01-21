@@ -1363,6 +1363,27 @@ export class Bot {
     return this.config;
   }
 
+  /**
+   * Update bot configuration at runtime
+   * Hot-reloadable settings take effect immediately
+   */
+  updateConfig(partial: Partial<BotConfig>): void {
+    const oldConfig = { ...this.config };
+    Object.assign(this.config, partial);
+
+    // Log changes
+    const changes: string[] = [];
+    for (const [key, value] of Object.entries(partial)) {
+      if (oldConfig[key as keyof BotConfig] !== value) {
+        changes.push(`${key}: ${value}`);
+      }
+    }
+
+    if (changes.length > 0) {
+      this.log(`Config updated: ${changes.join(", ")}`);
+    }
+  }
+
   getWsStats(): WsStats {
     return {
       marketConnected: this.state.wsConnected,

@@ -1,6 +1,7 @@
 import { Bot, type BotConfig } from "./bot";
 import { renderUI } from "./ui";
 import { initDatabase } from "./db";
+import { mergeWithStoredConfig, getConfigFilePath, loadStoredConfig } from "./cli/config-store";
 
 const parseEnvFloat = (key: string, defaultVal: string): number =>
   parseFloat(process.env[key] || defaultVal);
@@ -20,7 +21,8 @@ if (!PRIVATE_KEY && !paperTrading) {
   process.exit(1);
 }
 
-const config: BotConfig = {
+// Build config from environment variables
+const envConfig: BotConfig = {
   entryThreshold: parseEnvFloat("ENTRY_THRESHOLD", "0.95"),
   maxEntryPrice: parseEnvFloat("MAX_ENTRY_PRICE", "0.98"),
   stopLoss: parseEnvFloat("STOP_LOSS", "0.80"),
@@ -36,6 +38,18 @@ const config: BotConfig = {
   funderAddress: process.env.FUNDER_ADDRESS,
   maxPositions: parseEnvInt("MAX_POSITIONS", "1")
 };
+
+// Merge with persisted config (JSON takes precedence over .env)
+const storedConfig = loadStoredConfig();
+const config: BotConfig = mergeWithStoredConfig(envConfig);
+
+// Log if using stored config
+if (storedConfig) {
+  const storedKeys = Object.keys(storedConfig.values);
+  if (storedKeys.length > 0) {
+    console.log(`Loaded config from ${getConfigFilePath()}: ${storedKeys.join(", ")}`);
+  }
+}
 
 // Validate configuration to catch invalid env vars early
 const validateRange = (val: number, min: number, max: number): boolean =>

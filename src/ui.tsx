@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { render, Box, Text, useInput, useApp } from "ink";
+import TextInput from "ink-text-input";
 import { Bot, type BotConfig, type BotState, type WsStats } from "./bot";
 import { getRecentTrades, getTotalPnL, getTradeStats, type Trade } from "./db";
 import { formatTimeRemaining, type EligibleMarket } from "./scanner";
+import { executeCommand, type CommandResult, type BacktestProgress } from "./cli";
 
 interface AppProps {
   bot: Bot;
@@ -320,14 +322,96 @@ function WsPanel({ stats }: { stats: WsStats }) {
   );
 }
 
-function Controls() {
+function Controls({ commandMode }: { commandMode: boolean }) {
+  if (commandMode) {
+    return (
+      <Box marginTop={1} gap={2}>
+        <Text color="cyan">[Enter] Execute</Text>
+        <Text color="gray">[Esc] Cancel</Text>
+      </Box>
+    );
+  }
+
   return (
     <Box marginTop={1} gap={2}>
       <Text color="gray">[s] Start/Stop</Text>
-      <Text color="gray">[r] Refresh</Text>
-      <Text color="gray">[↑/↓] Scroll logs</Text>
-      <Text color="gray">[e] Latest</Text>
+      <Text color="cyan">[:] Command</Text>
+      <Text color="gray">[↑/↓] Scroll</Text>
       <Text color="gray">[q] Quit</Text>
+    </Box>
+  );
+}
+
+interface CommandLineProps {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: (value: string) => void;
+}
+
+function CommandLine({ value, onChange, onSubmit }: CommandLineProps) {
+  return (
+    <Box borderStyle="single" borderColor="cyan" paddingX={1} marginTop={1}>
+      <Text color="cyan">:</Text>
+      <TextInput
+        value={value}
+        onChange={onChange}
+        onSubmit={onSubmit}
+        placeholder="type command (help for list)"
+      />
+    </Box>
+  );
+}
+
+interface CommandOutputProps {
+  result: CommandResult | null;
+  progress: BacktestProgress | null;
+}
+
+function CommandOutput({ result, progress }: CommandOutputProps) {
+  if (progress && progress.phase !== "complete") {
+    const percent = Math.floor((progress.current / progress.total) * 100);
+    const barWidth = 20;
+    const filled = Math.floor((percent / 100) * barWidth);
+    const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
+
+    return (
+      <Box borderStyle="single" borderColor="yellow" paddingX={1} marginTop={1} flexDirection="column">
+        <Text color="yellow">{progress.message || "Running..."}</Text>
+        <Box>
+          <Text color="cyan">[{bar}] {percent}%</Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (!result) return null;
+
+  const borderColor = result.success ? "green" : "red";
+  const icon = result.success ? "✓" : "✗";
+
+  // Handle multi-line output
+  const lines = result.message.split("\n");
+  const maxLines = 12; // Limit displayed lines
+  const displayLines = lines.slice(0, maxLines);
+  const hasMore = lines.length > maxLines;
+
+  return (
+    <Box
+      borderStyle="single"
+      borderColor={borderColor}
+      paddingX={1}
+      marginTop={1}
+      flexDirection="column"
+      height={Math.min(lines.length + 2, maxLines + 2)}
+    >
+      {displayLines.map((line, i) => (
+        <Text key={i} color={i === 0 ? borderColor : "white"}>
+          {i === 0 ? `${icon} ` : "  "}{line}
+        </Text>
+      ))}
+      {hasMore && (
+        <Text color="gray">  ... ({lines.length - maxLines} more lines)</Text>
+      )}
     </Box>
   );
 }
@@ -341,6 +425,13 @@ function App({ bot }: AppProps) {
   const [logScrollOffset, setLogScrollOffset] = useState(0);
   const [autoScroll, setAutoScroll] = useState(true);
   const logDisplayCount = 5;
+
+  // Command mode state
+  const [commandMode, setCommandMode] = useState(false);
+  const [commandInput, setCommandInput] = useState("");
+  const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
+  const [backtestProgress, setBacktestProgress] = useState<BacktestProgress | null>(null);
+  const [isExecuting, setIsExecuting] = useState(false);
 
   const refresh = async () => {
     setState({ ...bot.getState() });
@@ -368,7 +459,80 @@ function App({ bot }: AppProps) {
     }
   }, [state.logs.length, autoScroll]);
 
+  // Clear command result after delay
+  useEffect(() => {
+    if (commandResult && !isExecuting) {
+      const timer = setTimeout(() => {
+        setCommandResult(null);
+      }, 10000); // Clear after 10 seconds
+      return () => clearTimeout(timer);
+    }
+  }, [commandResult, isExecuting]);
+
+  const handleCommandSubmit = useCallback(async (input: string) => {
+    if (!input.trim()) {
+      setCommandMode(false);
+      setCommandInput("");
+      return;
+    }
+
+    setIsExecuting(true);
+    setCommandResult(null);
+    setBacktestProgress(null);
+
+    try {
+      const result = await executeCommand(input, bot, {
+        onProgress: (progress) => {
+          setBacktestProgress(progress);
+        },
+        onQuit: () => {
+          bot.stop();
+          exit();
+        },
+      });
+
+      setCommandResult(result);
+      setBacktestProgress(null);
+
+      // Refresh state after command execution
+      await refresh();
+    } catch (error) {
+      setCommandResult({
+        success: false,
+        message: `Error: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      setIsExecuting(false);
+      setCommandMode(false);
+      setCommandInput("");
+    }
+  }, [bot, exit]);
+
   useInput((input, key) => {
+    // Handle Escape key to exit command mode
+    if (key.escape) {
+      if (commandMode) {
+        setCommandMode(false);
+        setCommandInput("");
+        setCommandResult(null);
+        setBacktestProgress(null);
+      }
+      return;
+    }
+
+    // Don't process other keys if in command mode (TextInput handles them)
+    if (commandMode) {
+      return;
+    }
+
+    // Enter command mode with ':'
+    if (input === ":") {
+      setCommandMode(true);
+      setCommandInput("");
+      setCommandResult(null);
+      return;
+    }
+
     if (input === "q") {
       bot.stop();
       exit();
@@ -416,7 +580,18 @@ function App({ bot }: AppProps) {
           <WsPanel stats={wsStats} />
         </Box>
       </Box>
-      <Controls />
+
+      {/* Command input and output */}
+      {commandMode && (
+        <CommandLine
+          value={commandInput}
+          onChange={setCommandInput}
+          onSubmit={handleCommandSubmit}
+        />
+      )}
+      <CommandOutput result={commandResult} progress={backtestProgress} />
+
+      <Controls commandMode={commandMode} />
     </Box>
   );
 }
