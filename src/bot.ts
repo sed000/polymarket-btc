@@ -127,10 +127,12 @@ export class Bot {
 
   private logDynamicStreak(isWin: boolean): void {
     if (this.config.riskMode !== "dynamic-risk") return;
-    const streakType = isWin ? "Win" : "Loss";
-    const streakCount = isWin ? this.state.consecutiveWins : this.state.consecutiveLosses;
-    const newThreshold = Math.min(0.70 + this.state.consecutiveLosses * 0.05, 0.85);
-    this.log(`[DYNAMIC] ${streakType} streak: ${streakCount} | Entry threshold: $${newThreshold.toFixed(2)}`);
+    if (isWin) {
+      this.log(`[DYNAMIC] Win streak: ${this.state.consecutiveWins} | Entry threshold reset to $0.70`);
+    } else {
+      const newThreshold = Math.min(0.70 + this.state.consecutiveLosses * 0.05, 0.85);
+      this.log(`[DYNAMIC] Loss streak: ${this.state.consecutiveLosses} | Entry threshold now: $${newThreshold.toFixed(2)}`);
+    }
   }
 
   private getModeLabel(): string {

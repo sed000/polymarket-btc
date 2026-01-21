@@ -56,7 +56,7 @@ function validateConfig(config: BotConfig): void {
   if (config.stopLoss >= config.entryThreshold) {
     errors.push("STOP_LOSS must be less than ENTRY_THRESHOLD");
   }
-  if (!validateRange(config.paperBalance, 0, Infinity)) {
+  if (isNaN(config.paperBalance) || config.paperBalance <= 0) {
     errors.push("PAPER_BALANCE must be a positive number");
   }
   if (!validateRange(config.maxPositions, 1, Infinity)) {

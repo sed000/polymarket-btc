@@ -124,29 +124,30 @@ export class Trader {
   private async validateAndAdjustShares(
     tokenId: string,
     shares: number,
-    logPrefix: string
+    logPrefix = ""
   ): Promise<number | null> {
     const positionBalance = await this.getPositionBalance(tokenId);
+    const prefix = logPrefix ? `${logPrefix} ` : "";
 
     if (positionBalance < 0.01) {
-      console.error(`${logPrefix} No position to sell (balance: ${positionBalance.toFixed(4)})`);
+      console.error(`${prefix}No position to sell (balance: ${positionBalance.toFixed(4)})`);
       return null;
     }
 
     const sharesToSell = Math.min(shares, positionBalance);
 
     if (sharesToSell < 0.01) {
-      console.error(`${logPrefix} Shares to sell too small: ${sharesToSell.toFixed(4)}`);
+      console.error(`${prefix}Shares to sell too small: ${sharesToSell.toFixed(4)}`);
       return null;
     }
 
     if (sharesToSell < MIN_ORDER_SIZE) {
-      console.error(`${logPrefix} Actual balance ${sharesToSell.toFixed(2)} below minimum ${MIN_ORDER_SIZE} shares`);
+      console.error(`${prefix}Actual balance ${sharesToSell.toFixed(2)} below minimum ${MIN_ORDER_SIZE} shares`);
       return null;
     }
 
     if (sharesToSell < shares * 0.99) {
-      console.log(`${logPrefix} Adjusted sell: ${shares.toFixed(2)} → ${sharesToSell.toFixed(2)} (actual balance)`);
+      console.log(`${prefix}Adjusted sell: ${shares.toFixed(2)} → ${sharesToSell.toFixed(2)} (actual balance)`);
     }
 
     return sharesToSell;
