@@ -1274,8 +1274,8 @@ export class Bot {
         this.log(`[PAPER] Bought ${shares.toFixed(2)} shares of ${side} @ $${askPrice.toFixed(2)} ask`);
         this.log(`[PAPER] Placed limit sell @ $${this.getProfitTarget().toFixed(2)}`);
       } else {
-        // Real trading
-        const balance = await this.trader.getBalance();
+        // Real trading - use compound-limited balance (set by applyCompoundLimit in tick)
+        const balance = this.state.balance;
         if (balance < 1) {
           this.log("Insufficient balance");
           return;
