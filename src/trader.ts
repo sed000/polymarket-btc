@@ -195,10 +195,10 @@ export class Trader {
         asset_type: "CONDITIONAL",
         token_id: tokenId
       });
-      // Conditional token balances are returned in shares (not micro-units)
-      // Note: USDC uses 6 decimals (micro-units), but conditional tokens don't
+      // Conditional token balances are returned in micro-units (6 decimals)
+      // Convert to shares by dividing by 1e6
       const rawBalance = parseFloat(balances.balance || "0");
-      return rawBalance;
+      return rawBalance / 1e6;
     } catch (err) {
       console.error(`[Trader] getPositionBalance API error: ${err instanceof Error ? err.message : err}`);
       return null;
