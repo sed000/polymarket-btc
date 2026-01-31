@@ -1,6 +1,6 @@
 import { Trader, type SignatureType, MIN_ORDER_SIZE } from "./trader";
 import { findEligibleMarkets, fetchBtc15MinMarkets, analyzeMarket, fetchMarketResolution, type EligibleMarket, type Market, type PriceOverride } from "./scanner";
-import { insertTrade, closeTrade, getOpenTrades, getLastClosedTrade, getLastWinningTradeInMarket, type Trade } from "./db";
+import { insertTrade, closeTrade, getOpenTrades, getLastClosedTrade, getLastWinningTradeInMarket, insertLog, type Trade, type LogLevel } from "./db";
 import { getPriceStream, UserStream, type MarketEvent, type PriceStream, type UserOrderEvent, type UserTradeEvent } from "./websocket";
 import { type ConfigManager, type ConfigChangeEvent, type BotConfig } from "./config";
 
@@ -273,6 +273,13 @@ export class Bot {
         this.log(`Loaded ${openTrades.length} open positions`);
         // Check for any expired positions immediately
         await this.checkExpiredPositions();
+
+        // CRITICAL: Subscribe position tokens to WebSocket for real-time stop-loss monitoring
+        if (this.priceStream.isConnected()) {
+          const positionTokenIds = [...this.state.positions.keys()];
+          this.priceStream.subscribe(positionTokenIds);
+          this.log(`Subscribed to ${positionTokenIds.length} position token(s) for stop-loss monitoring`);
+        }
       }
 
       // Log final balance after processing
@@ -348,6 +355,14 @@ export class Bot {
         if (this.state.positions.size > 0) {
           // Check for any expired positions immediately
           await this.checkExpiredPositions();
+
+          // CRITICAL: Subscribe position tokens to WebSocket for real-time stop-loss monitoring
+          // Markets may no longer be in state.markets if they're closed/expired
+          if (this.priceStream.isConnected()) {
+            const positionTokenIds = [...this.state.positions.keys()];
+            this.priceStream.subscribe(positionTokenIds);
+            this.log(`Subscribed to ${positionTokenIds.length} position token(s) for stop-loss monitoring`);
+          }
         }
       } else {
         this.state.initError = this.trader.getInitError();
@@ -395,7 +410,7 @@ export class Bot {
     }
   }
 
-  private log(message: string): void {
+  private log(message: string, context?: { marketSlug?: string; tokenId?: string; tradeId?: number }): void {
     const timestamp = new Date().toLocaleTimeString();
     const formatted = `[${timestamp}] ${message}`;
     this.state.logs.push(formatted);
@@ -403,6 +418,70 @@ export class Bot {
       this.state.logs.shift();
     }
     this.onLog(formatted);
+
+    // Persist to database with parsed context
+    const logEntry = this.parseLogMessage(message, context);
+    insertLog(logEntry);
+  }
+
+  /**
+   * Parse log message to extract level, market, and token info
+   */
+  private parseLogMessage(message: string, context?: { marketSlug?: string; tokenId?: string; tradeId?: number }): {
+    message: string;
+    level: LogLevel;
+    marketSlug?: string;
+    tokenId?: string;
+    tradeId?: number;
+  } {
+    let level: LogLevel = "INFO";
+
+    // Detect log level from message prefixes
+    if (message.startsWith("[WS]")) {
+      level = "WS";
+    } else if (message.startsWith("[PAPER]")) {
+      level = "TRADE";
+    } else if (message.startsWith("[STOP-LOSS]") || message.includes("Stop-loss")) {
+      level = "TRADE";
+    } else if (message.startsWith("[CONFIG]")) {
+      level = "INFO";
+    } else if (message.includes("Entry signal") || message.includes("Skipping:")) {
+      level = "SIGNAL";
+    } else if (message.includes("Bought") || message.includes("Sold") || message.includes("Order") || message.includes("PnL:")) {
+      level = "TRADE";
+    } else if (message.includes("Error") || message.includes("error") || message.includes("CRITICAL") || message.includes("Failed")) {
+      level = "ERROR";
+    } else if (message.includes("Warning") || message.includes("warning") || message.includes("WARNING")) {
+      level = "WARN";
+    }
+
+    // Extract market slug from message if not provided in context
+    let marketSlug = context?.marketSlug;
+    if (!marketSlug) {
+      // Try to extract market slug patterns like "btc-updown-15m-*"
+      const marketMatch = message.match(/(btc-updown-15m-\d+)/);
+      if (marketMatch) {
+        marketSlug = marketMatch[1];
+      }
+    }
+
+    // Extract token ID from message if not provided (look for hex-like strings)
+    let tokenId = context?.tokenId;
+    if (!tokenId) {
+      // Token IDs are typically long numeric strings
+      const tokenMatch = message.match(/token[:\s]+(\d{10,})/i);
+      if (tokenMatch) {
+        tokenId = tokenMatch[1];
+      }
+    }
+
+    return {
+      message,
+      level,
+      marketSlug,
+      tokenId,
+      tradeId: context?.tradeId
+    };
   }
 
   /**
@@ -541,7 +620,11 @@ export class Bot {
         this.wsLimitFills.delete(current.limitOrderId);
       }
 
-      this.log(`[${source}] Limit order filled @ $${exitPrice.toFixed(2)}! PnL: $${pnl.toFixed(2)}`);
+      this.log(`[${source}] Limit order filled @ $${exitPrice.toFixed(2)}! PnL: $${pnl.toFixed(2)}`, {
+        marketSlug: current.marketSlug,
+        tokenId: current.tokenId,
+        tradeId: current.tradeId
+      });
       const newBalance = await this.trader.getBalance();
       if (newBalance !== null) {
         this.state.balance = newBalance;
@@ -659,6 +742,14 @@ export class Bot {
       }
       if (market.id) {
         marketIds.add(market.id);
+      }
+    }
+
+    // CRITICAL: Also subscribe to position tokens for real-time stop-loss monitoring
+    // Position tokens may not be in the markets list if markets are closed/expired
+    for (const tokenId of this.state.positions.keys()) {
+      if (!tokenIds.includes(tokenId)) {
+        tokenIds.push(tokenId);
       }
     }
     if (this.userStream) {
@@ -788,7 +879,11 @@ export class Bot {
             this.state.positions.delete(tokenId);
             this.state.balance += proceeds;
 
-            this.log(`[PAPER] Limit order filled @ $${exitPrice.toFixed(2)}! PnL: $${pnl.toFixed(2)}`);
+            this.log(`[PAPER] Limit order filled @ $${exitPrice.toFixed(2)}! PnL: $${pnl.toFixed(2)}`, {
+              marketSlug: position.marketSlug,
+              tokenId,
+              tradeId: position.tradeId
+            });
             this.log(`[PAPER] New balance: $${this.state.balance.toFixed(2)}`);
             this.checkCompoundLimit();
           }
@@ -863,7 +958,11 @@ export class Bot {
     for (const [tokenId, position] of this.state.positions) {
       // Check if market has ended
       if (position.marketEndDate.getTime() > 0 && now >= position.marketEndDate) {
-        this.log(`Market expired for ${position.side} position`);
+        this.log(`Market expired for ${position.side} position`, {
+          marketSlug: position.marketSlug,
+          tokenId,
+          tradeId: position.tradeId
+        });
 
         if (this.config.paperTrading) {
           // Paper trading: check WebSocket resolution first, then fall back to API
@@ -901,7 +1000,11 @@ export class Bot {
           this.state.positions.delete(tokenId);
           this.state.balance += proceeds;
 
-          this.log(`[PAPER] Market resolved. Sold ${position.shares.toFixed(2)} shares @ $${exitPrice.toFixed(2)}. PnL: $${pnl.toFixed(2)}`);
+          this.log(`[PAPER] Market resolved. Sold ${position.shares.toFixed(2)} shares @ $${exitPrice.toFixed(2)}. PnL: $${pnl.toFixed(2)}`, {
+            marketSlug: position.marketSlug,
+            tokenId,
+            tradeId: position.tradeId
+          });
           this.log(`[PAPER] New balance: $${this.state.balance.toFixed(2)}`);
           this.checkCompoundLimit();
         } else {
@@ -920,7 +1023,11 @@ export class Bot {
               this.state.positions.delete(tokenId);
               const realPnl = (result.price - position.entryPrice) * position.shares;
 
-              this.log(`Market resolved @ $${result.price.toFixed(2)}. PnL: $${realPnl.toFixed(2)}`);
+              this.log(`Market resolved @ $${result.price.toFixed(2)}. PnL: $${realPnl.toFixed(2)}`, {
+                marketSlug: position.marketSlug,
+                tokenId,
+                tradeId: position.tradeId
+              });
 
               // Sync balance after exit
               const newBalance = await this.trader.getBalance();
@@ -978,7 +1085,11 @@ export class Bot {
     this.state.pendingExits.add(tokenId);
 
     try {
-      this.log(`[WS] Stop-loss TRIGGERED for ${position.side} @ $${currentBid.toFixed(2)}`);
+      this.log(`[WS] Stop-loss TRIGGERED for ${position.side} @ $${currentBid.toFixed(2)}`, {
+        marketSlug: position.marketSlug,
+        tokenId: position.tokenId,
+        tradeId: position.tradeId
+      });
 
       if (this.config.paperTrading) {
         // Paper trading: simulate sell at bid price
@@ -988,7 +1099,11 @@ export class Bot {
         this.state.positions.delete(tokenId);
         this.state.balance += proceeds;
         const pnl = (exitPrice - position.entryPrice) * position.shares;
-        this.log(`[PAPER] Sold ${position.shares.toFixed(2)} shares @ $${exitPrice.toFixed(2)}. PnL: $${pnl.toFixed(2)}`);
+        this.log(`[PAPER] Sold ${position.shares.toFixed(2)} shares @ $${exitPrice.toFixed(2)}. PnL: $${pnl.toFixed(2)}`, {
+          marketSlug: position.marketSlug,
+          tokenId: position.tokenId,
+          tradeId: position.tradeId
+        });
 
         this.checkCompoundLimit();
       } else {
@@ -1013,7 +1128,11 @@ export class Bot {
             closeTrade(position.tradeId, result.price, "STOPPED");
             this.state.positions.delete(tokenId);
             const pnl = (result.price - position.entryPrice) * position.shares;
-            this.log(`Closed position @ $${result.price.toFixed(2)}. PnL: $${pnl.toFixed(2)}`);
+            this.log(`Closed position @ $${result.price.toFixed(2)}. PnL: $${pnl.toFixed(2)}`, {
+              marketSlug: position.marketSlug,
+              tokenId: position.tokenId,
+              tradeId: position.tradeId
+            });
 
             // Sync balance after exit
             const newBalance = await this.trader.getBalance();
@@ -1221,7 +1340,10 @@ export class Bot {
         return;
       }
 
-      this.log(`Entry signal: ${side} @ $${askPrice.toFixed(2)} ask (${Math.floor(market.timeRemaining / 1000)}s remaining)`);
+      this.log(`Entry signal: ${side} @ $${askPrice.toFixed(2)} ask (${Math.floor(market.timeRemaining / 1000)}s remaining)`, {
+        marketSlug: market.slug,
+        tokenId
+      });
 
       if (this.config.paperTrading) {
         // Paper trading: simulate buy at ask price
@@ -1271,10 +1393,19 @@ export class Bot {
             limitOrderId: "paper-limit-" + tradeId // Simulated limit order
           });
 
+          // Ensure tokenId is subscribed for real-time stop-loss monitoring
+          if (this.priceStream.isConnected()) {
+            this.priceStream.subscribe([tokenId]);
+          }
+
           // Deduct from paper balance
           this.state.balance -= availableBalance;
 
-          this.log(`[PAPER] Bought ${shares.toFixed(2)} shares of ${side} @ $${askPrice.toFixed(2)} ask (fee: ${(paperFeeRate * 100).toFixed(1)}%)`);
+          this.log(`[PAPER] Bought ${shares.toFixed(2)} shares of ${side} @ $${askPrice.toFixed(2)} ask (fee: ${(paperFeeRate * 100).toFixed(1)}%)`, {
+            marketSlug: market.slug,
+            tokenId,
+            tradeId
+          });
           this.log(`[PAPER] Placed limit sell @ $${this.getProfitTarget().toFixed(2)}`);
         } finally {
           // Release the reserved balance
@@ -1322,7 +1453,10 @@ export class Bot {
           const actualEntryPrice = fillInfo.avgPrice || askPrice;
           const actualCost = actualShares * actualEntryPrice;
 
-          this.log(`Order filled: ${actualShares.toFixed(2)} shares @ $${actualEntryPrice.toFixed(2)}`);
+          this.log(`Order filled: ${actualShares.toFixed(2)} shares @ $${actualEntryPrice.toFixed(2)}`, {
+            marketSlug: market.slug,
+            tokenId
+          });
 
           // Wait for position to settle before placing limit sell
           this.log(`Waiting for position settlement...`);
@@ -1378,6 +1512,11 @@ export class Bot {
             marketEndDate: endDate,
             limitOrderId
           });
+
+          // Ensure tokenId is subscribed for real-time stop-loss monitoring
+          if (this.priceStream.isConnected()) {
+            this.priceStream.subscribe([tokenId]);
+          }
 
           // Sync balance after trade
           const newBalance = await this.trader.getBalance();

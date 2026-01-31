@@ -54,6 +54,26 @@ export function initDatabase(paperTrading: boolean): void {
     }
   }
 
+  // Activity logs table for persistent logging
+  db.run(`
+    CREATE TABLE IF NOT EXISTS activity_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT NOT NULL,
+      timestamp_unix INTEGER NOT NULL,
+      message TEXT NOT NULL,
+      level TEXT NOT NULL DEFAULT 'INFO',
+      market_slug TEXT,
+      token_id TEXT,
+      trade_id INTEGER,
+      metadata TEXT
+    )
+  `);
+
+  // Create indexes for efficient querying
+  db.run(`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON activity_logs(timestamp_unix DESC)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_logs_market ON activity_logs(market_slug)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_logs_level ON activity_logs(level)`);
+
   console.log(`Database initialized: ${dbPath}`);
 }
 
@@ -193,6 +213,154 @@ export function getLastWinningTradeInMarket(marketSlug: string, side: "UP" | "DO
     ORDER BY closed_at DESC LIMIT 1
   `);
   return stmt.get(marketSlug, side) as Trade | null;
+}
+
+// ============================================================================
+// ACTIVITY LOGS
+// ============================================================================
+
+export type LogLevel = "INFO" | "WARN" | "ERROR" | "TRADE" | "SIGNAL" | "WS";
+
+export interface ActivityLog {
+  id: number;
+  timestamp: string;
+  timestamp_unix: number;
+  message: string;
+  level: LogLevel;
+  market_slug: string | null;
+  token_id: string | null;
+  trade_id: number | null;
+  metadata: string | null;
+}
+
+export interface LogEntry {
+  message: string;
+  level?: LogLevel;
+  marketSlug?: string;
+  tokenId?: string;
+  tradeId?: number;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Insert a log entry into the activity_logs table
+ */
+export function insertLog(entry: LogEntry): number {
+  try {
+    const database = ensureDb();
+    const now = new Date();
+    const stmt = database.prepare(`
+      INSERT INTO activity_logs (timestamp, timestamp_unix, message, level, market_slug, token_id, trade_id, metadata)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const result = stmt.run(
+      now.toISOString(),
+      now.getTime(),
+      entry.message,
+      entry.level || "INFO",
+      entry.marketSlug || null,
+      entry.tokenId || null,
+      entry.tradeId || null,
+      entry.metadata ? JSON.stringify(entry.metadata) : null
+    );
+    return Number(result.lastInsertRowid);
+  } catch (err) {
+    // Don't throw on log failures - just console.warn
+    console.warn(`[DB] Failed to insert log: ${err instanceof Error ? err.message : err}`);
+    return -1;
+  }
+}
+
+/**
+ * Get recent activity logs
+ */
+export function getRecentLogs(limit = 100): ActivityLog[] {
+  const database = ensureDb();
+  const stmt = database.prepare(`
+    SELECT * FROM activity_logs
+    ORDER BY timestamp_unix DESC
+    LIMIT ?
+  `);
+  return stmt.all(limit) as ActivityLog[];
+}
+
+/**
+ * Get logs for a specific market
+ */
+export function getLogsByMarket(marketSlug: string, limit = 50): ActivityLog[] {
+  const database = ensureDb();
+  const stmt = database.prepare(`
+    SELECT * FROM activity_logs
+    WHERE market_slug = ?
+    ORDER BY timestamp_unix DESC
+    LIMIT ?
+  `);
+  return stmt.all(marketSlug, limit) as ActivityLog[];
+}
+
+/**
+ * Get logs by level (e.g., all ERROR logs)
+ */
+export function getLogsByLevel(level: LogLevel, limit = 100): ActivityLog[] {
+  const database = ensureDb();
+  const stmt = database.prepare(`
+    SELECT * FROM activity_logs
+    WHERE level = ?
+    ORDER BY timestamp_unix DESC
+    LIMIT ?
+  `);
+  return stmt.all(level, limit) as ActivityLog[];
+}
+
+/**
+ * Get logs within a time range
+ */
+export function getLogsByTimeRange(startTime: Date, endTime: Date, limit = 500): ActivityLog[] {
+  const database = ensureDb();
+  const stmt = database.prepare(`
+    SELECT * FROM activity_logs
+    WHERE timestamp_unix >= ? AND timestamp_unix <= ?
+    ORDER BY timestamp_unix ASC
+    LIMIT ?
+  `);
+  return stmt.all(startTime.getTime(), endTime.getTime(), limit) as ActivityLog[];
+}
+
+/**
+ * Get log count by level (for stats)
+ */
+export function getLogStats(): { level: string; count: number }[] {
+  const database = ensureDb();
+  const stmt = database.prepare(`
+    SELECT level, COUNT(*) as count
+    FROM activity_logs
+    GROUP BY level
+    ORDER BY count DESC
+  `);
+  return stmt.all() as { level: string; count: number }[];
+}
+
+/**
+ * Clear old logs (older than specified days)
+ */
+export function clearOldLogs(daysToKeep = 30): number {
+  const database = ensureDb();
+  const cutoff = Date.now() - (daysToKeep * 24 * 60 * 60 * 1000);
+  const stmt = database.prepare(`
+    DELETE FROM activity_logs
+    WHERE timestamp_unix < ?
+  `);
+  const result = stmt.run(cutoff);
+  return result.changes;
+}
+
+/**
+ * Clear all activity logs
+ */
+export function clearAllLogs(): void {
+  const database = ensureDb();
+  database.run("DELETE FROM activity_logs");
+  console.log("Activity logs cleared");
 }
 
 // ============================================================================
