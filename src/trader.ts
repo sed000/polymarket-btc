@@ -498,7 +498,7 @@ export class Trader {
    * Get detailed fill information for an order
    * Returns actual filled shares and average fill price
    */
-  async getOrderFillInfo(orderId: string): Promise<{ filled: boolean; filledShares: number; avgPrice: number } | null> {
+  async getOrderFillInfo(orderId: string): Promise<{ filled: boolean; filledShares: number; avgPrice: number; status: string } | null> {
     const order = await this.getOrder(orderId);
     if (!order) return null;
 
@@ -508,8 +508,9 @@ export class Trader {
 
     // Calculate average fill price from the order
     const avgPrice = parseFloat(order.price || "0");
+    const status = (order.status || "").toUpperCase();
 
-    return { filled, filledShares, avgPrice };
+    return { filled, filledShares, avgPrice, status };
   }
 
   /**
@@ -518,22 +519,32 @@ export class Trader {
    */
   async waitForFill(orderId: string, timeoutMs: number = 10000, pollIntervalMs: number = 500): Promise<{ filledShares: number; avgPrice: number } | null> {
     const startTime = Date.now();
+    let consecutiveApiErrors = 0;
+    const maxConsecutiveApiErrors = 5; // Allow temporary API failures
 
     while (Date.now() - startTime < timeoutMs) {
       const fillInfo = await this.getOrderFillInfo(orderId);
 
       if (!fillInfo) {
-        // Order not found - may have been cancelled
-        return null;
+        // API error or order not found yet - wait and retry (don't give up immediately)
+        consecutiveApiErrors++;
+        if (consecutiveApiErrors >= maxConsecutiveApiErrors) {
+          console.log(`[waitForFill] ${maxConsecutiveApiErrors} consecutive API errors - giving up`);
+          return null;
+        }
+        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+        continue;
       }
+
+      // Reset error counter on successful API call
+      consecutiveApiErrors = 0;
 
       if (fillInfo.filled && fillInfo.filledShares > 0) {
         return { filledShares: fillInfo.filledShares, avgPrice: fillInfo.avgPrice };
       }
 
-      // Check if order was cancelled or rejected
-      const order = await this.getOrder(orderId);
-      if (order && (order.status === "CANCELLED" || order.status === "REJECTED")) {
+      // Check if order was explicitly cancelled or rejected
+      if (fillInfo.status === "CANCELLED" || fillInfo.status === "REJECTED") {
         return null;
       }
 
