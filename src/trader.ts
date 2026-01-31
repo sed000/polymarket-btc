@@ -371,32 +371,38 @@ export class Trader {
 
     // Validate input shares
     if (!shares || shares < 0.01) {
-      console.error(`[STOP-LOSS] Invalid shares to sell: ${shares}`);
-      return null;
+      const errMsg = `[STOP-LOSS] Invalid shares to sell: ${shares}`;
+      console.error(errMsg);
+      throw new Error(errMsg);
     }
 
     // Polymarket minimum order size is 5 shares
     if (shares < MIN_ORDER_SIZE) {
-      console.error(`[STOP-LOSS] Sell size ${shares.toFixed(2)} below minimum ${MIN_ORDER_SIZE} shares - position too small to sell`);
-      return null;
+      const errMsg = `[STOP-LOSS] Sell size ${shares.toFixed(2)} below minimum ${MIN_ORDER_SIZE} shares - position too small to sell`;
+      console.error(errMsg);
+      throw new Error(errMsg);
     }
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         const sharesToSell = await this.validateAndAdjustShares(tokenId, shares, "[STOP-LOSS]");
-        if (sharesToSell === null) return null;
+        if (sharesToSell === null) {
+          throw new Error(`[STOP-LOSS] validateAndAdjustShares returned null - check position balance`);
+        }
 
         // Get current bid price for market sell (already rate limited)
         const bidCheck = await this.checkBidValid(tokenId);
 
         if (!bidCheck.valid) {
+          let errMsg: string;
           if (bidCheck.reason === "empty_book") {
-            console.error(`[STOP-LOSS] Order book empty (bid=0) - market may have resolved or no liquidity`);
+            errMsg = `[STOP-LOSS] Order book empty (bid=0) - market may have resolved or no liquidity`;
           } else {
-            console.error(`[STOP-LOSS] Bid price too low: $${bidCheck.bid.toFixed(4)} (min: 0.05) - likely bad data or resolved market`);
+            errMsg = `[STOP-LOSS] Bid price too low: $${bidCheck.bid.toFixed(4)} (min: 0.05) - likely bad data or resolved market`;
           }
-          // Don't retry if market is likely resolved - return null to trigger redemption flow
-          return null;
+          console.error(errMsg);
+          // Don't retry if market is likely resolved - throw to trigger redemption flow
+          throw new Error(errMsg);
         }
 
         let validBid = bidCheck.bid;
@@ -436,8 +442,9 @@ export class Trader {
           continue;
         }
 
-        console.error("[STOP-LOSS] Sell failed:", response.errorMsg);
-        return null;
+        const errMsg = `[STOP-LOSS] Sell failed: ${response.errorMsg || "unknown error"}`;
+        console.error(errMsg);
+        throw new Error(errMsg);
       } catch (err: any) {
         if (this.isBalanceAllowanceError(err?.toString() || "")) {
           const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 4000);
@@ -445,13 +452,14 @@ export class Trader {
           await new Promise(resolve => setTimeout(resolve, backoffMs));
           continue;
         }
-        console.error("[STOP-LOSS] Sell error:", err);
-        return null;
+        // Re-throw to be caught by bot.ts for logging
+        throw err;
       }
     }
 
-    console.error("[STOP-LOSS] Market sell failed after all retries - CRITICAL");
-    return null;
+    const errMsg = "[STOP-LOSS] Market sell failed after all retries - CRITICAL";
+    console.error(errMsg);
+    throw new Error(errMsg);
   }
 
   async getOpenOrders(): Promise<any[]> {

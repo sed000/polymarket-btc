@@ -1157,7 +1157,21 @@ export class Bot {
             }
           }
         } catch (err) {
-          this.log(`Error executing stop-loss: ${err}`);
+          this.log(`[STOP-LOSS] Error: ${err instanceof Error ? err.message : err}`, {
+            marketSlug: position.marketSlug,
+            tokenId: position.tokenId,
+            tradeId: position.tradeId
+          });
+          // Try to re-place limit order for protection after error
+          try {
+            const limitResult = await this.trader.limitSell(tokenId, position.shares, this.getProfitTarget());
+            if (limitResult) {
+              position.limitOrderId = limitResult.orderId;
+              this.log(`[STOP-LOSS] Re-placed limit order @ $${this.getProfitTarget().toFixed(2)} after error`);
+            }
+          } catch (limitErr) {
+            this.log(`[STOP-LOSS] CRITICAL: Could not re-place limit order: ${limitErr}`);
+          }
         }
       }
     } finally {
