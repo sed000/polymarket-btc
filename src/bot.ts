@@ -763,27 +763,11 @@ export class Bot {
       this.userStream.setMarkets([...marketIds]);
     }
     if (tokenIds.length > 0) {
-      const beforeCount = this.priceStream.getPriceCount();
       this.priceStream.subscribe(tokenIds);
-
-      // Log subscription status
+      // Don't log subscription status on every scan - too spammy
+      // Only log warnings when there's a real issue
       if (!this.priceStream.isConnected()) {
         this.log(`Warning: WebSocket not connected, prices may be delayed`);
-      } else {
-        this.log(`Subscribed to ${tokenIds.length} tokens, waiting for prices...`);
-
-        // Give WebSocket time to receive initial book snapshots
-        await new Promise(resolve => setTimeout(resolve, 1500));
-
-        const afterCount = this.priceStream.getPriceCount();
-        const newPrices = afterCount - beforeCount;
-
-        if (newPrices > 0) {
-          this.log(`Received ${newPrices} new price updates (total: ${afterCount})`);
-        } else {
-          // Prices are still updating in real-time even if no NEW tokens were added
-          this.log(`Tracking ${afterCount} live prices via WebSocket`);
-        }
       }
     }
   }
@@ -1206,7 +1190,7 @@ export class Bot {
       eligibleSide: side
     };
 
-    this.log(`[WS] Entry signal detected: ${side} @ $${bestAsk.toFixed(2)}`);
+    // Don't log every WS signal - too spammy. Only log when actually entering.
     await this.enterPosition(eligibleMarket);
   }
 
@@ -1248,60 +1232,31 @@ export class Bot {
     // Normalize endDate to Date object (may be string from API)
     const endDate = market.endDate instanceof Date ? market.endDate : new Date(market.endDate);
 
-    // MUTEX: Prevent concurrent entries for same token (race condition fix)
-    if (this.state.pendingEntries.has(tokenId)) {
-      return;
-    }
-    if (this.state.positions.has(tokenId)) {
-      return;
-    }
+    // EARLY EXITS (before mutex) - these checks don't need mutex protection
+    // and checking them first avoids unnecessary mutex churn
+    if (this.state.pendingEntries.has(tokenId)) return;
+    if (this.state.positions.has(tokenId)) return;
+    if (this.state.positions.size >= this.config.maxPositions) return;
+    if (askPrice >= this.getProfitTarget()) return;
+    if (askPrice > activeConfig.maxEntryPrice) return;
+    if (askPrice < activeConfig.entryThreshold) return;
+    if ((askPrice - bidPrice) > activeConfig.maxSpread) return;
+
+    // Only enter OPPOSITE side of last WINNING trade IN THE SAME MARKET
+    const lastWinningTrade = getLastWinningTradeInMarket(market.slug, side);
+    if (lastWinningTrade) return;
+
+    // MUTEX: Now we're actually going to try to enter
     this.state.pendingEntries.add(tokenId);
 
     try {
-      // Check position limit (prevent excessive risk exposure)
-      // Include pendingEntries in count to prevent race condition where multiple signals
-      // all pass the check simultaneously before any position is recorded
-      const currentPositionCount = this.state.positions.size + this.state.pendingEntries.size - 1; // -1 because we already added this tokenId
+      // Double-check position count with mutex held (race condition protection)
+      const currentPositionCount = this.state.positions.size + this.state.pendingEntries.size - 1;
       if (currentPositionCount >= this.config.maxPositions) {
-        this.log(`Skipping: max positions (${this.config.maxPositions}) reached`);
         return;
       }
 
-      // Don't buy if price is already at or above profit target
-      if (askPrice >= this.getProfitTarget()) {
-        this.log(`Skipping: ask $${askPrice.toFixed(2)} >= profit target $${this.getProfitTarget().toFixed(2)}`);
-        return;
-      }
-
-      // Don't buy if price is above max entry (ceiling filter)
-      if (askPrice > activeConfig.maxEntryPrice) {
-        this.log(`Skipping: ask $${askPrice.toFixed(2)} > max entry $${activeConfig.maxEntryPrice.toFixed(2)}`);
-        return;
-      }
-
-      // Don't buy if spread is too wide (liquidity filter)
-      const spread = askPrice - bidPrice;
-      if (spread > activeConfig.maxSpread) {
-        this.log(`Skipping: spread $${spread.toFixed(2)} > max $${activeConfig.maxSpread.toFixed(2)}`);
-        return;
-      }
-
-      // Don't buy if ask price is below entry threshold
-      if (askPrice < activeConfig.entryThreshold) {
-        this.log(`Skipping: ask $${askPrice.toFixed(2)} < entry threshold $${activeConfig.entryThreshold.toFixed(2)}`);
-        return;
-      }
-
-      // Only enter OPPOSITE side of last WINNING trade IN THE SAME MARKET for the same side
-      // This prevents chasing the same direction after it already won
-      // But allows re-entry after a stop-loss (give it another chance)
-      // Uses market-specific lookup instead of just last trade globally
-      const lastWinningTrade = getLastWinningTradeInMarket(market.slug, side);
-      if (lastWinningTrade) {
-        this.log(`Skipping: already won ${side} with +$${lastWinningTrade.pnl?.toFixed(2) || '?'} in this market`);
-        return;
-      }
-
+      // Log entry attempt (only fires when we're actually going to try)
       this.log(`Entry signal: ${side} @ $${askPrice.toFixed(2)} ask (${Math.floor(market.timeRemaining / 1000)}s remaining)`, {
         marketSlug: market.slug,
         tokenId
