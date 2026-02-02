@@ -1,10 +1,11 @@
 import { Trader, type SignatureType, MIN_ORDER_SIZE } from "./trader";
 import { findEligibleMarkets, fetchBtc15MinMarkets, analyzeMarket, fetchMarketResolution, type EligibleMarket, type Market, type PriceOverride } from "./scanner";
-import { insertTrade, closeTrade, getOpenTrades, getLastClosedTrade, getLastWinningTradeInMarket, insertLog, type Trade, type LogLevel } from "./db";
+import { insertTrade, closeTrade, getOpenTrades, getLastClosedTrade, getLastWinningTradeInMarket, insertLog, markAsLadderTrade, type Trade, type LogLevel } from "./db";
 import { getPriceStream, UserStream, type MarketEvent, type PriceStream, type UserOrderEvent, type UserTradeEvent } from "./websocket";
-import { type ConfigManager, type ConfigChangeEvent, type BotConfig } from "./config";
+import { type ConfigManager, type ConfigChangeEvent, type BotConfig, type LadderModeConfig, type LadderStep } from "./config";
 
 export type { RiskMode, BotConfig } from "./config";
+export type { LadderState };
 
 export interface Position {
   tradeId: number;
@@ -15,6 +16,42 @@ export interface Position {
   marketSlug: string;
   marketEndDate: Date;
   // No limit orders - using WebSocket monitoring for profit target and stop-loss
+  // Ladder mode fields
+  isLadder?: boolean;
+}
+
+// Ladder state tracking for multi-step trading
+export interface LadderState {
+  tokenId: string;
+  side: "UP" | "DOWN";
+  marketSlug: string;
+  marketEndDate: Date;
+
+  // Progress tracking
+  currentStepIndex: number;      // Which step we're waiting for
+  completedSteps: string[];      // IDs of completed steps
+  skippedSteps: string[];        // IDs of skipped steps (with reasons)
+  skippedReasons: Map<string, string>; // stepId -> reason
+
+  // Position aggregation
+  totalShares: number;           // Accumulated shares from all buys
+  totalCostBasis: number;        // Total USDC spent
+  averageEntryPrice: number;     // Weighted average
+  totalSharesSold: number;       // Shares sold so far
+  totalSellProceeds: number;     // USDC received from sells
+
+  // Timing
+  ladderStartTime: number;
+  lastStepTime: number;
+  lastStepPrice: number;
+
+  // Database tracking
+  tradeIds: number[];            // All trade IDs created for this ladder
+
+  // Recovery tracking (after stop-loss reset)
+  needsRecovery: boolean;        // If true, wait for price to rise above first trigger before re-entering
+
+  status: "active" | "completed" | "stopped";
 }
 
 export interface BotState {
@@ -35,6 +72,8 @@ export interface BotState {
   paperTrading: boolean;
   // Market resolutions from WebSocket (slug -> winning token ID)
   marketResolutions: Map<string, string>;
+  // Ladder mode state tracking (tokenId -> LadderState)
+  ladderStates: Map<string, LadderState>;
 }
 
 export interface WsStats {
@@ -89,7 +128,8 @@ export class Bot {
       userWsConnected: false,
       markets: [],
       paperTrading: this.config.paperTrading,
-      marketResolutions: new Map()
+      marketResolutions: new Map(),
+      ladderStates: new Map()
     };
 
     // Subscribe to config changes for hot-reload
@@ -202,6 +242,20 @@ export class Bot {
     };
   }
 
+  /**
+   * Check if current mode is ladder mode
+   */
+  private isLadderMode(): boolean {
+    return this.configManager.isLadderMode();
+  }
+
+  /**
+   * Get the ladder mode config (returns null if not in ladder mode)
+   */
+  private getLadderConfig(): LadderModeConfig | null {
+    return this.configManager.getLadderMode();
+  }
+
   async init(): Promise<void> {
     // Fetch initial markets
     try {
@@ -227,12 +281,26 @@ export class Bot {
     // Real-time price monitoring via WebSocket
     // Note: Using async callback to properly await mutex-protected operations
     this.priceStream.onPrice(async (update) => {
-      // Real-time stop-loss check (await to prevent race conditions)
-      await this.checkStopLossRealtime(update.tokenId, update.bestBid);
-      // Real-time profit target check (await to prevent race conditions)
-      await this.checkProfitTargetRealtime(update.tokenId, update.bestBid);
-      // Real-time entry check (await to prevent race conditions)
-      await this.checkEntryRealtime(update.tokenId, update.bestBid, update.bestAsk);
+      // Check if we're in ladder mode
+      if (this.isLadderMode()) {
+        // Ladder mode: check ladder steps for this token
+        await this.checkLadderStepRealtime(update.tokenId, update.bestBid, update.bestAsk);
+        // Still check stop-loss for non-ladder positions
+        const ladderState = this.state.ladderStates.get(update.tokenId);
+        if (!ladderState) {
+          await this.checkStopLossRealtime(update.tokenId, update.bestBid);
+        }
+        // Real-time entry check for new ladder positions
+        await this.checkEntryRealtime(update.tokenId, update.bestBid, update.bestAsk);
+      } else {
+        // Normal mode: existing behavior
+        // Real-time stop-loss check (await to prevent race conditions)
+        await this.checkStopLossRealtime(update.tokenId, update.bestBid);
+        // Real-time profit target check (await to prevent race conditions)
+        await this.checkProfitTargetRealtime(update.tokenId, update.bestBid);
+        // Real-time entry check (await to prevent race conditions)
+        await this.checkEntryRealtime(update.tokenId, update.bestBid, update.bestAsk);
+      }
     });
 
     this.priceStream.onMarketEvent((event) => {
@@ -1014,6 +1082,10 @@ export class Bot {
     // Only check if we have a position for this token and bot is running
     if (!this.state.running || !this.state.tradingEnabled) return;
 
+    // Skip profit target check for ladder positions (they use step-based exits)
+    const ladderState = this.state.ladderStates.get(tokenId);
+    if (ladderState) return;
+
     const position = this.state.positions.get(tokenId);
     if (!position) return;
 
@@ -1023,6 +1095,621 @@ export class Bot {
     if (currentBid >= profitTarget) {
       await this.executeTakeProfit(tokenId, position, currentBid, "WS");
     }
+  }
+
+  // ============================================================================
+  // LADDER MODE METHODS
+  // ============================================================================
+
+  /**
+   * Real-time ladder step check triggered by WebSocket price updates
+   */
+  private async checkLadderStepRealtime(tokenId: string, currentBid: number, currentAsk: number): Promise<void> {
+    // Only process if bot is running and we have an active ladder for this token
+    if (!this.state.running || !this.state.tradingEnabled) return;
+
+    const ladderState = this.state.ladderStates.get(tokenId);
+    if (!ladderState || ladderState.status !== "active") return;
+
+    const ladderConfig = this.getLadderConfig();
+    if (!ladderConfig) return;
+
+
+    // Priority 1: Global stop-loss (only if we have shares)
+    const hasShares = ladderState.totalShares - ladderState.totalSharesSold > 0.01;
+    if (hasShares && currentBid <= ladderConfig.globalStopLoss && currentBid > 0) {
+      await this.executeLadderStopLoss(tokenId, ladderState, currentBid);
+      return;
+    }
+
+    // Priority 2: Recovery check (after stop-loss reset)
+    // Wait for price to rise ABOVE first buy trigger before allowing re-entry
+    if (ladderState.needsRecovery) {
+      const firstBuyStep = ladderConfig.steps.find(s => s.enabled && s.action === "buy");
+      if (firstBuyStep && currentAsk > firstBuyStep.triggerPrice) {
+        // Price has recovered above trigger, ready to trade again
+        ladderState.needsRecovery = false;
+        ladderState.lastStepTime = Date.now();
+        this.log(`[LADDER] Price recovered to $${currentAsk.toFixed(2)} - ready for step 1 @ $${firstBuyStep.triggerPrice.toFixed(2)}`, {
+          marketSlug: ladderState.marketSlug,
+          tokenId
+        });
+      } else {
+        // Still waiting for recovery
+        return;
+      }
+    }
+
+    // Get next pending step
+    const nextStep = this.getNextEnabledStep(ladderState, ladderConfig);
+    if (!nextStep) {
+      // All steps completed or skipped
+      if (ladderState.status === "active") {
+        ladderState.status = "completed";
+        const totalPnl = ladderState.totalSellProceeds - ladderState.totalCostBasis;
+        this.log(`[LADDER] Completed all steps. Total PnL: $${totalPnl.toFixed(2)}`, {
+          marketSlug: ladderState.marketSlug,
+          tokenId
+        });
+      }
+      return;
+    }
+
+    // Check trigger conditions based on action type
+    // Log current step being checked (for debugging)
+    const stepIndex = ladderState.currentStepIndex + 1;
+    const totalSteps = ladderConfig.steps.length;
+
+    if (nextStep.action === "buy") {
+      // Buy triggers when ask price drops to or below trigger
+      if (currentAsk <= nextStep.triggerPrice) {
+        this.log(`[LADDER] Step ${stepIndex}/${totalSteps} "${nextStep.id}" triggered: ask $${currentAsk.toFixed(2)} <= $${nextStep.triggerPrice.toFixed(2)}`, {
+          marketSlug: ladderState.marketSlug,
+          tokenId
+        });
+        await this.executeLadderBuyStep(tokenId, ladderState, nextStep, currentAsk, ladderConfig);
+      }
+    } else if (nextStep.action === "sell") {
+      // Sell triggers when bid price rises to or above trigger
+      if (currentBid >= nextStep.triggerPrice) {
+        this.log(`[LADDER] Step ${stepIndex}/${totalSteps} "${nextStep.id}" triggered: bid $${currentBid.toFixed(2)} >= $${nextStep.triggerPrice.toFixed(2)}`, {
+          marketSlug: ladderState.marketSlug,
+          tokenId
+        });
+        await this.executeLadderSellStep(tokenId, ladderState, nextStep, currentBid, ladderConfig);
+      }
+    }
+  }
+
+  /**
+   * Get the next step in sequence (strictly ordered)
+   * Only returns the step at currentStepIndex - steps MUST execute in order
+   */
+  private getNextEnabledStep(ladderState: LadderState, config: LadderModeConfig): LadderStep | null {
+    // Strict sequential order: only look at the current step index
+    if (ladderState.currentStepIndex >= config.steps.length) {
+      return null; // All steps completed
+    }
+
+    const step = config.steps[ladderState.currentStepIndex];
+
+    // Skip disabled steps
+    if (!step.enabled) {
+      ladderState.currentStepIndex++;
+      return this.getNextEnabledStep(ladderState, config); // Recurse to next step
+    }
+
+    // Skip already completed steps (safety check)
+    if (ladderState.completedSteps.includes(step.id)) {
+      ladderState.currentStepIndex++;
+      return this.getNextEnabledStep(ladderState, config);
+    }
+
+    // Skip already skipped steps
+    if (ladderState.skippedSteps.includes(step.id)) {
+      ladderState.currentStepIndex++;
+      return this.getNextEnabledStep(ladderState, config);
+    }
+
+    return step;
+  }
+
+  /**
+   * Skip a ladder step with a reason
+   */
+  private skipLadderStep(ladderState: LadderState, stepId: string, reason: string): void {
+    ladderState.skippedSteps.push(stepId);
+    ladderState.skippedReasons.set(stepId, reason);
+    this.log(`[LADDER] Skipped step "${stepId}": ${reason}`, {
+      marketSlug: ladderState.marketSlug,
+      tokenId: ladderState.tokenId
+    });
+  }
+
+  /**
+   * Calculate step size based on sizeType and sizeValue
+   */
+  private calculateStepSize(
+    step: LadderStep,
+    ladderState: LadderState,
+    availableBalance: number,
+    currentPrice: number
+  ): number {
+    if (step.action === "buy") {
+      if (step.sizeType === "percent") {
+        return availableBalance * (step.sizeValue / 100);
+      } else {
+        return Math.min(step.sizeValue, availableBalance);
+      }
+    } else {
+      // sell
+      const remainingShares = ladderState.totalShares - ladderState.totalSharesSold;
+      if (step.sizeType === "percent") {
+        return remainingShares * (step.sizeValue / 100);
+      } else {
+        return Math.min(step.sizeValue / currentPrice, remainingShares);
+      }
+    }
+  }
+
+  /**
+   * Execute a ladder buy step
+   */
+  private async executeLadderBuyStep(
+    tokenId: string,
+    ladderState: LadderState,
+    step: LadderStep,
+    askPrice: number,
+    config: LadderModeConfig
+  ): Promise<void> {
+    // SKIP CHECK: Don't execute if step is already completed or skipped
+    if (ladderState.completedSteps.includes(step.id)) {
+      this.log(`[LADDER] Step "${step.id}" already completed - skipping`, {
+        marketSlug: ladderState.marketSlug,
+        tokenId
+      });
+      return;
+    }
+    if (ladderState.skippedSteps.includes(step.id)) {
+      return; // Already skipped, no need to log again
+    }
+
+    // MUTEX: Prevent concurrent operations on same token
+    if (this.state.pendingEntries.has(tokenId)) return;
+    this.state.pendingEntries.add(tokenId);
+
+    try {
+      const availableBalance = this.getAvailableBalance();
+      const buyAmount = this.calculateStepSize(step, ladderState, availableBalance, askPrice);
+
+      // Check minimum order requirements
+      const estimatedShares = buyAmount / askPrice;
+      if (buyAmount < 1 || estimatedShares < MIN_ORDER_SIZE) {
+        this.skipLadderStep(ladderState, step.id, "insufficient_balance");
+        ladderState.currentStepIndex++;
+        return;
+      }
+
+      this.log(`[LADDER] Executing buy step "${step.id}" @ $${askPrice.toFixed(2)} ($${buyAmount.toFixed(2)})`, {
+        marketSlug: ladderState.marketSlug,
+        tokenId
+      });
+
+      if (this.config.paperTrading) {
+        // Paper trading: simulate buy
+        const paperFeeRate = this.getPaperFeeRate();
+        const shares = (buyAmount / askPrice) * (1 - paperFeeRate);
+
+        // Record trade
+        const tradeId = insertTrade({
+          market_slug: ladderState.marketSlug,
+          token_id: tokenId,
+          side: ladderState.side,
+          entry_price: askPrice,
+          shares,
+          cost_basis: buyAmount,
+          created_at: new Date().toISOString(),
+          market_end_date: ladderState.marketEndDate.toISOString()
+        });
+
+        // Mark as ladder trade
+        markAsLadderTrade(tradeId, step.id);
+        ladderState.tradeIds.push(tradeId);
+
+        // Update ladder state
+        ladderState.totalShares += shares;
+        ladderState.totalCostBasis += buyAmount;
+        ladderState.averageEntryPrice = ladderState.totalCostBasis / ladderState.totalShares;
+
+        // Deduct from balance
+        this.state.balance -= buyAmount;
+
+        this.log(`[PAPER] Bought ${shares.toFixed(2)} shares @ $${askPrice.toFixed(2)} (step: ${step.id})`, {
+          marketSlug: ladderState.marketSlug,
+          tokenId,
+          tradeId
+        });
+
+        // Update or create position
+        const existingPosition = this.state.positions.get(tokenId);
+        if (existingPosition) {
+          existingPosition.shares = ladderState.totalShares;
+          existingPosition.entryPrice = ladderState.averageEntryPrice;
+        } else {
+          this.state.positions.set(tokenId, {
+            tradeId,
+            tokenId,
+            shares: ladderState.totalShares,
+            entryPrice: ladderState.averageEntryPrice,
+            side: ladderState.side,
+            marketSlug: ladderState.marketSlug,
+            marketEndDate: ladderState.marketEndDate,
+            isLadder: true
+          });
+        }
+      } else {
+        // Real trading
+        this.state.reservedBalance += buyAmount;
+        try {
+          const result = await this.trader.buy(tokenId, askPrice, buyAmount);
+          if (!result) {
+            this.skipLadderStep(ladderState, step.id, "buy_failed");
+            ladderState.currentStepIndex++;
+            return;
+          }
+
+          const fillInfo = await this.trader.waitForFill(result.orderId, 10000);
+          if (!fillInfo || fillInfo.filledShares <= 0) {
+            await this.trader.cancelOrder(result.orderId);
+            this.skipLadderStep(ladderState, step.id, "order_not_filled");
+            ladderState.currentStepIndex++;
+            return;
+          }
+
+          const actualShares = fillInfo.filledShares;
+          const actualEntryPrice = fillInfo.avgPrice || askPrice;
+          const actualCost = actualShares * actualEntryPrice;
+
+          const tradeId = insertTrade({
+            market_slug: ladderState.marketSlug,
+            token_id: tokenId,
+            side: ladderState.side,
+            entry_price: actualEntryPrice,
+            shares: actualShares,
+            cost_basis: actualCost,
+            created_at: new Date().toISOString(),
+            market_end_date: ladderState.marketEndDate.toISOString()
+          });
+
+          // Mark as ladder trade
+          markAsLadderTrade(tradeId, step.id);
+          ladderState.tradeIds.push(tradeId);
+          ladderState.totalShares += actualShares;
+          ladderState.totalCostBasis += actualCost;
+          ladderState.averageEntryPrice = ladderState.totalCostBasis / ladderState.totalShares;
+
+          this.log(`Bought ${actualShares.toFixed(2)} shares @ $${actualEntryPrice.toFixed(2)} (step: ${step.id})`, {
+            marketSlug: ladderState.marketSlug,
+            tokenId,
+            tradeId
+          });
+
+          // Update or create position
+          const existingPosition = this.state.positions.get(tokenId);
+          if (existingPosition) {
+            existingPosition.shares = ladderState.totalShares;
+            existingPosition.entryPrice = ladderState.averageEntryPrice;
+          } else {
+            this.state.positions.set(tokenId, {
+              tradeId,
+              tokenId,
+              shares: ladderState.totalShares,
+              entryPrice: ladderState.averageEntryPrice,
+              side: ladderState.side,
+              marketSlug: ladderState.marketSlug,
+              marketEndDate: ladderState.marketEndDate,
+              isLadder: true
+            });
+          }
+
+          const newBalance = await this.trader.getBalance();
+          if (newBalance !== null) {
+            this.state.balance = newBalance;
+          }
+        } finally {
+          this.state.reservedBalance -= buyAmount;
+        }
+      }
+
+      // Mark step completed
+      ladderState.completedSteps.push(step.id);
+      ladderState.currentStepIndex++;
+      ladderState.lastStepTime = Date.now();
+      ladderState.lastStepPrice = askPrice;
+
+    } finally {
+      this.state.pendingEntries.delete(tokenId);
+    }
+  }
+
+  /**
+   * Execute a ladder sell step
+   */
+  private async executeLadderSellStep(
+    tokenId: string,
+    ladderState: LadderState,
+    step: LadderStep,
+    bidPrice: number,
+    config: LadderModeConfig
+  ): Promise<void> {
+    // SKIP CHECK: Don't execute if step is already completed or skipped
+    if (ladderState.completedSteps.includes(step.id)) {
+      this.log(`[LADDER] Step "${step.id}" already completed - skipping`, {
+        marketSlug: ladderState.marketSlug,
+        tokenId
+      });
+      return;
+    }
+    if (ladderState.skippedSteps.includes(step.id)) {
+      return; // Already skipped, no need to log again
+    }
+
+    // MUTEX: Prevent concurrent operations on same token
+    if (this.state.pendingExits.has(tokenId)) return;
+    this.state.pendingExits.add(tokenId);
+
+    try {
+      const remainingShares = ladderState.totalShares - ladderState.totalSharesSold;
+      const sellShares = this.calculateStepSize(step, ladderState, 0, bidPrice);
+
+      // Check if we have shares to sell
+      if (sellShares < 0.01 || remainingShares < 0.01) {
+        this.skipLadderStep(ladderState, step.id, "insufficient_shares");
+        ladderState.currentStepIndex++;
+        return;
+      }
+
+      const actualSellShares = Math.min(sellShares, remainingShares);
+
+      this.log(`[LADDER] Executing sell step "${step.id}" @ $${bidPrice.toFixed(2)} (${actualSellShares.toFixed(2)} shares)`, {
+        marketSlug: ladderState.marketSlug,
+        tokenId
+      });
+
+      if (this.config.paperTrading) {
+        // Paper trading: simulate sell
+        const proceeds = actualSellShares * bidPrice;
+
+        // Calculate PnL for this portion
+        const costBasisPortion = (actualSellShares / ladderState.totalShares) * ladderState.totalCostBasis;
+        const pnl = proceeds - costBasisPortion;
+
+        ladderState.totalSharesSold += actualSellShares;
+        ladderState.totalSellProceeds += proceeds;
+        this.state.balance += proceeds;
+
+        this.log(`[PAPER] Sold ${actualSellShares.toFixed(2)} shares @ $${bidPrice.toFixed(2)}. Step PnL: $${pnl.toFixed(2)} (step: ${step.id})`, {
+          marketSlug: ladderState.marketSlug,
+          tokenId
+        });
+
+        // Update position
+        const position = this.state.positions.get(tokenId);
+        if (position) {
+          position.shares = ladderState.totalShares - ladderState.totalSharesSold;
+          if (position.shares < 0.01) {
+            // All shares sold, close the position
+            for (const tradeId of ladderState.tradeIds) {
+              closeTrade(tradeId, bidPrice, "RESOLVED");
+            }
+            this.state.positions.delete(tokenId);
+          }
+        }
+
+        this.checkCompoundLimit();
+      } else {
+        // Real trading
+        const result = await this.trader.marketSell(tokenId, actualSellShares, bidPrice);
+        if (!result) {
+          this.skipLadderStep(ladderState, step.id, "sell_failed");
+          ladderState.currentStepIndex++;
+          return;
+        }
+
+        const proceeds = actualSellShares * result.price;
+        ladderState.totalSharesSold += actualSellShares;
+        ladderState.totalSellProceeds += proceeds;
+
+        const costBasisPortion = (actualSellShares / ladderState.totalShares) * ladderState.totalCostBasis;
+        const pnl = proceeds - costBasisPortion;
+
+        this.log(`Sold ${actualSellShares.toFixed(2)} shares @ $${result.price.toFixed(2)}. Step PnL: $${pnl.toFixed(2)} (step: ${step.id})`, {
+          marketSlug: ladderState.marketSlug,
+          tokenId
+        });
+
+        // Update position
+        const position = this.state.positions.get(tokenId);
+        if (position) {
+          position.shares = ladderState.totalShares - ladderState.totalSharesSold;
+          if (position.shares < 0.01) {
+            for (const tradeId of ladderState.tradeIds) {
+              closeTrade(tradeId, result.price, "RESOLVED");
+            }
+            this.state.positions.delete(tokenId);
+          }
+        }
+
+        const newBalance = await this.trader.getBalance();
+        if (newBalance !== null) {
+          this.state.balance = newBalance;
+        }
+      }
+
+      // Mark step completed
+      ladderState.completedSteps.push(step.id);
+      ladderState.currentStepIndex++;
+      ladderState.lastStepTime = Date.now();
+      ladderState.lastStepPrice = bidPrice;
+
+      // Check if all shares have been sold
+      if (ladderState.totalSharesSold >= ladderState.totalShares * 0.99) {
+        ladderState.status = "completed";
+        const totalPnl = ladderState.totalSellProceeds - ladderState.totalCostBasis;
+        this.log(`[LADDER] All shares sold. Total PnL: $${totalPnl.toFixed(2)}`, {
+          marketSlug: ladderState.marketSlug,
+          tokenId
+        });
+        this.state.ladderStates.delete(tokenId);
+      }
+
+    } finally {
+      this.state.pendingExits.delete(tokenId);
+    }
+  }
+
+  /**
+   * Execute global stop-loss for ladder position (sells ALL remaining shares)
+   * After stop-loss, resets the ladder to step 1 to allow re-entry
+   */
+  private async executeLadderStopLoss(tokenId: string, ladderState: LadderState, currentBid: number): Promise<void> {
+    // MUTEX: Prevent concurrent operations on same token
+    if (this.state.pendingExits.has(tokenId)) return;
+    this.state.pendingExits.add(tokenId);
+
+    try {
+      const remainingShares = ladderState.totalShares - ladderState.totalSharesSold;
+      if (remainingShares < 0.01) {
+        // No shares to sell, just reset the ladder
+        this.resetLadderState(ladderState);
+        this.log(`[LADDER] Reset to step 1 - waiting for new entry`, {
+          marketSlug: ladderState.marketSlug,
+          tokenId
+        });
+        return;
+      }
+
+      this.log(`[LADDER] GLOBAL STOP-LOSS TRIGGERED @ $${currentBid.toFixed(2)} - selling ALL ${remainingShares.toFixed(2)} shares`, {
+        marketSlug: ladderState.marketSlug,
+        tokenId
+      });
+
+      if (this.config.paperTrading) {
+        // Paper trading: simulate emergency sell
+        const proceeds = remainingShares * currentBid;
+        ladderState.totalSharesSold += remainingShares;
+        ladderState.totalSellProceeds += proceeds;
+        this.state.balance += proceeds;
+
+        const totalPnl = ladderState.totalSellProceeds - ladderState.totalCostBasis;
+        this.log(`[PAPER] Emergency sold ${remainingShares.toFixed(2)} shares @ $${currentBid.toFixed(2)}. Total PnL: $${totalPnl.toFixed(2)}`, {
+          marketSlug: ladderState.marketSlug,
+          tokenId
+        });
+
+        // Close all trades for this ladder
+        for (const tradeId of ladderState.tradeIds) {
+          closeTrade(tradeId, currentBid, "STOPPED");
+        }
+
+        this.state.positions.delete(tokenId);
+        this.checkCompoundLimit();
+      } else {
+        // Real trading: market sell all remaining shares
+        const result = await this.trader.marketSell(tokenId, remainingShares, currentBid);
+        if (result) {
+          const proceeds = remainingShares * result.price;
+          ladderState.totalSharesSold += remainingShares;
+          ladderState.totalSellProceeds += proceeds;
+
+          const totalPnl = ladderState.totalSellProceeds - ladderState.totalCostBasis;
+          this.log(`[STOP-LOSS] Emergency sold ${remainingShares.toFixed(2)} shares @ $${result.price.toFixed(2)}. Total PnL: $${totalPnl.toFixed(2)}`, {
+            marketSlug: ladderState.marketSlug,
+            tokenId
+          });
+
+          for (const tradeId of ladderState.tradeIds) {
+            closeTrade(tradeId, result.price, "STOPPED");
+          }
+
+          this.state.positions.delete(tokenId);
+
+          const newBalance = await this.trader.getBalance();
+          if (newBalance !== null) {
+            this.state.balance = newBalance;
+          }
+        } else {
+          this.log(`[STOP-LOSS] Market sell failed - will retry on next tick`, {
+            marketSlug: ladderState.marketSlug,
+            tokenId
+          });
+          return; // Don't reset, will retry
+        }
+      }
+
+      // Reset the ladder to step 1 instead of deleting it
+      this.resetLadderState(ladderState);
+      this.log(`[LADDER] Reset to step 1 - waiting for new entry @ $${this.getLadderConfig()?.steps[0]?.triggerPrice.toFixed(2) || '?'}`, {
+        marketSlug: ladderState.marketSlug,
+        tokenId
+      });
+
+    } finally {
+      this.state.pendingExits.delete(tokenId);
+    }
+  }
+
+  /**
+   * Reset ladder state to step 1 (used after stop-loss or completion)
+   */
+  private resetLadderState(ladderState: LadderState): void {
+    ladderState.currentStepIndex = 0;
+    ladderState.completedSteps = [];
+    ladderState.skippedSteps = [];
+    ladderState.skippedReasons.clear();
+    ladderState.totalShares = 0;
+    ladderState.totalCostBasis = 0;
+    ladderState.averageEntryPrice = 0;
+    ladderState.totalSharesSold = 0;
+    ladderState.totalSellProceeds = 0;
+    ladderState.lastStepTime = Date.now();
+    ladderState.lastStepPrice = 0;
+    ladderState.tradeIds = [];
+    ladderState.needsRecovery = true; // Wait for price to recover before re-entering
+    ladderState.status = "active";
+  }
+
+  /**
+   * Initialize a new ladder state for a position
+   */
+  private initializeLadderState(
+    tokenId: string,
+    side: "UP" | "DOWN",
+    marketSlug: string,
+    marketEndDate: Date
+  ): LadderState {
+    const now = Date.now();
+    return {
+      tokenId,
+      side,
+      marketSlug,
+      marketEndDate,
+      currentStepIndex: 0,
+      completedSteps: [],
+      skippedSteps: [],
+      skippedReasons: new Map(),
+      totalShares: 0,
+      totalCostBasis: 0,
+      averageEntryPrice: 0,
+      totalSharesSold: 0,
+      totalSellProceeds: 0,
+      ladderStartTime: now,
+      lastStepTime: now,
+      lastStepPrice: 0,
+      tradeIds: [],
+      needsRecovery: false, // New ladders don't need recovery
+      status: "active"
+    };
   }
 
   /**
@@ -1251,6 +1938,9 @@ export class Bot {
     // Skip if we already have a position for this token (enterPosition also checks, but early exit is faster)
     if (this.state.positions.has(tokenId)) return;
 
+    // Skip if we already have an active ladder for this token
+    if (this.state.ladderStates.has(tokenId)) return;
+
     // Find the market for this token
     const market = this.state.markets.find(m =>
       m.clobTokenIds.includes(tokenId)
@@ -1277,8 +1967,9 @@ export class Bot {
     // Check entry threshold (ask must be >= threshold and <= max)
     if (bestAsk < activeConfig.entryThreshold || bestAsk > activeConfig.maxEntryPrice) return;
 
-    // Don't buy if price is at or above profit target
-    if (bestAsk >= this.getProfitTarget()) return;
+    // Don't buy if price is at or above profit target (only for normal mode)
+    // Ladder mode doesn't use profit target - it uses step-based triggers
+    if (!this.isLadderMode() && bestAsk >= this.getProfitTarget()) return;
 
     // Build eligible market object for enterPosition
     const marketEndDate = market.endDate instanceof Date ? market.endDate : new Date(market.endDate);
@@ -1318,9 +2009,10 @@ export class Bot {
       }, priceOverrides);
 
       for (const market of eligible) {
-        // Skip if we already have a position in this market
+        // Skip if we already have a position or ladder in this market
         const tokenId = market.eligibleSide === "UP" ? market.upTokenId : market.downTokenId;
         if (this.state.positions.has(tokenId)) continue;
+        if (this.state.ladderStates.has(tokenId)) continue;
 
         await this.enterPosition(market);
       }
@@ -1338,12 +2030,20 @@ export class Bot {
     // Normalize endDate to Date object (may be string from API)
     const endDate = market.endDate instanceof Date ? market.endDate : new Date(market.endDate);
 
+    // Check if we're in ladder mode
+    const isLadder = this.isLadderMode();
+    const ladderConfig = isLadder ? this.getLadderConfig() : null;
+
     // EARLY EXITS (before mutex) - these checks don't need mutex protection
     // and checking them first avoids unnecessary mutex churn
     if (this.state.pendingEntries.has(tokenId)) return;
     if (this.state.positions.has(tokenId)) return;
+    if (this.state.ladderStates.has(tokenId)) return; // Already have ladder for this token
     if (this.state.positions.size >= this.config.maxPositions) return;
-    if (askPrice >= this.getProfitTarget()) return;
+
+    // For normal mode, skip if at or above profit target
+    if (!isLadder && askPrice >= this.getProfitTarget()) return;
+
     if (askPrice > activeConfig.maxEntryPrice) return;
     if (askPrice < activeConfig.entryThreshold) return;
     if ((askPrice - bidPrice) > activeConfig.maxSpread) return;
@@ -1368,6 +2068,67 @@ export class Bot {
         tokenId
       });
 
+      // LADDER MODE: Initialize ladder state and wait for first step trigger
+      if (isLadder && ladderConfig) {
+        this.log(`[LADDER] Entry signal detected for ${side} @ ask=$${askPrice.toFixed(2)} bid=$${bidPrice.toFixed(2)}`, {
+          marketSlug: market.slug,
+          tokenId
+        });
+
+        // Check if first step is a buy and current price triggers it
+        const firstBuyStep = ladderConfig.steps.find(s => s.enabled && s.action === "buy");
+        if (!firstBuyStep) {
+          this.log(`[LADDER] No enabled buy steps found - skipping`, {
+            marketSlug: market.slug,
+            tokenId
+          });
+          return;
+        }
+
+        // Initialize ladder state
+        const ladderState = this.initializeLadderState(tokenId, side, market.slug, endDate);
+        ladderState.lastStepPrice = askPrice;
+
+        // Only start ladder if price is ABOVE the first buy trigger (we want to catch the drop)
+        // If price is already at or below the trigger, skip - we missed the entry
+        if (askPrice < firstBuyStep.triggerPrice) {
+          this.log(`[LADDER] Price $${askPrice.toFixed(2)} already below first step trigger $${firstBuyStep.triggerPrice.toFixed(2)} - skipping`, {
+            marketSlug: market.slug,
+            tokenId
+          });
+          return;
+        }
+
+        // Store ladder state and wait for price to drop to trigger
+        this.state.ladderStates.set(tokenId, ladderState);
+
+        // Check if current price is exactly at the trigger (within small tolerance)
+        const priceTolerance = 0.005; // $0.005 tolerance
+        if (Math.abs(askPrice - firstBuyStep.triggerPrice) <= priceTolerance) {
+          this.log(`[LADDER] Starting ladder - first buy step triggered @ $${askPrice.toFixed(2)}`, {
+            marketSlug: market.slug,
+            tokenId
+          });
+
+          // Execute the first buy step
+          await this.executeLadderBuyStep(tokenId, ladderState, firstBuyStep, askPrice, ladderConfig);
+        } else {
+          // Price is above trigger - wait for it to drop
+          this.log(`[LADDER] Waiting for first step trigger @ $${firstBuyStep.triggerPrice.toFixed(2)} (current: $${askPrice.toFixed(2)})`, {
+            marketSlug: market.slug,
+            tokenId
+          });
+        }
+
+        // Ensure token is subscribed for ladder monitoring
+        if (this.priceStream.isConnected()) {
+          this.priceStream.subscribe([tokenId]);
+        }
+
+        return; // Ladder mode handles its own entry via executeLadderBuyStep
+      }
+
+      // NORMAL MODE: Original entry logic
       if (this.config.paperTrading) {
         // Paper trading: simulate buy at ask price
         const availableBalance = this.getAvailableBalance();

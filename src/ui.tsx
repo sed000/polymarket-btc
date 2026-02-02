@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { render, Box, Text, useInput, useApp } from "ink";
-import { Bot, type BotState, type WsStats } from "./bot";
+import { Bot, type BotState, type WsStats, type LadderState } from "./bot";
 import { getRecentTrades, getTotalPnL, getTradeStats, type Trade } from "./db";
 import { formatTimeRemaining, type EligibleMarket } from "./scanner";
 import { type ConfigManager } from "./config";
@@ -11,6 +11,7 @@ interface AppProps {
 
 function Header({ state, configManager }: { state: BotState; configManager: ConfigManager }) {
   const mode = configManager.getActiveMode();
+  const isLadder = configManager.isLadderMode();
   const borderColor = state.paperTrading ? "yellow" : "cyan";
 
   // Get active config values from ConfigManager
@@ -18,11 +19,14 @@ function Header({ state, configManager }: { state: BotState; configManager: Conf
   const activeMaxEntry = mode.maxEntryPrice;
   const activeStop = mode.stopLoss;
 
+  // Get active ladders count
+  const activeLadders = state.ladderStates?.size || 0;
+
   return (
     <Box flexDirection="column" borderStyle="single" borderColor={borderColor} paddingX={1}>
       <Box justifyContent="space-between">
         <Text bold color={borderColor}>
-          POLYMARKET BTC 15-MIN BOT {state.paperTrading && "[PAPER]"}
+          POLYMARKET BTC 15-MIN BOT {state.paperTrading && "[PAPER]"} {isLadder && <Text color="magenta">[LADDER]</Text>}
         </Text>
         <Box gap={2}>
           <Text color={state.wsConnected ? "green" : "yellow"}>
@@ -57,6 +61,9 @@ function Header({ state, configManager }: { state: BotState; configManager: Conf
         <Text>Entry: <Text color="yellow">${activeEntry.toFixed(2)}-{activeMaxEntry.toFixed(2)}</Text></Text>
         <Text>Stop: <Text color="red">≤${activeStop.toFixed(2)}</Text></Text>
         <Text>Pos: <Text color="cyan">{state.positions.size}</Text></Text>
+        {isLadder && activeLadders > 0 && (
+          <Text>Ladders: <Text color="magenta">{activeLadders}</Text></Text>
+        )}
       </Box>
     </Box>
   );
@@ -110,53 +117,108 @@ function MarketsTable({ markets }: { markets: EligibleMarket[] }) {
 
 function PositionsTable({ state, configManager }: { state: BotState; configManager: ConfigManager }) {
   const positions = Array.from(state.positions.values());
+  const isLadder = configManager.isLadderMode();
+  const ladderConfig = configManager.getLadderMode();
 
   // Get active stop-loss and profit target from config
   const mode = configManager.getActiveMode();
   const defaultStopLoss = mode.stopLoss;
   const profitTarget = mode.profitTarget;
 
+  // Helper to get ladder state for a position
+  const getLadderState = (tokenId: string): LadderState | undefined => {
+    return state.ladderStates?.get(tokenId);
+  };
+
   return (
     <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} marginTop={1}>
-      <Text bold color="white">Open Positions</Text>
+      <Text bold color="white">Open Positions {isLadder && "(Ladder Mode)"}</Text>
       <Box marginTop={1} flexDirection="column">
-        <Box>
-          <Box width={6}><Text color="gray">Side</Text></Box>
-          <Box width={8}><Text color="gray">Entry</Text></Box>
-          <Box width={8}><Text color="gray">Shares</Text></Box>
-          <Box width={8}><Text color="gray">Stop</Text></Box>
-          <Box width={10}><Text color="gray">Win</Text></Box>
-          <Box width={10}><Text color="gray">Loss</Text></Box>
-        </Box>
+        {!isLadder ? (
+          // Normal mode header
+          <Box>
+            <Box width={6}><Text color="gray">Side</Text></Box>
+            <Box width={8}><Text color="gray">Entry</Text></Box>
+            <Box width={8}><Text color="gray">Shares</Text></Box>
+            <Box width={8}><Text color="gray">Stop</Text></Box>
+            <Box width={10}><Text color="gray">Win</Text></Box>
+            <Box width={10}><Text color="gray">Loss</Text></Box>
+          </Box>
+        ) : (
+          // Ladder mode header
+          <Box>
+            <Box width={6}><Text color="gray">Side</Text></Box>
+            <Box width={8}><Text color="gray">Avg</Text></Box>
+            <Box width={8}><Text color="gray">Shares</Text></Box>
+            <Box width={10}><Text color="gray">Progress</Text></Box>
+            <Box width={10}><Text color="gray">Cost</Text></Box>
+            <Box width={10}><Text color="gray">Sold</Text></Box>
+          </Box>
+        )}
         {positions.length === 0 ? (
           <Text color="gray">No open positions</Text>
         ) : (
           positions.map((p, i) => {
-            const stopLoss = defaultStopLoss;
-            const potentialWin = (profitTarget - p.entryPrice) * p.shares;
-            const potentialLoss = (p.entryPrice - stopLoss) * p.shares;
-            return (
-              <Box key={i}>
-                <Box width={6}>
-                  <Text color={p.side === "UP" ? "green" : "red"}>{p.side}</Text>
+            const ladderState = getLadderState(p.tokenId);
+
+            if (isLadder && ladderState) {
+              // Ladder position display
+              const totalSteps = ladderConfig?.steps.length || 0;
+              const completedCount = ladderState.completedSteps.length;
+              const skippedCount = ladderState.skippedSteps.length;
+              const progressText = `${completedCount}/${totalSteps}`;
+
+              return (
+                <Box key={i}>
+                  <Box width={6}>
+                    <Text color={p.side === "UP" ? "green" : "red"}>{p.side}</Text>
+                  </Box>
+                  <Box width={8}>
+                    <Text>${ladderState.averageEntryPrice.toFixed(2)}</Text>
+                  </Box>
+                  <Box width={8}>
+                    <Text>{(ladderState.totalShares - ladderState.totalSharesSold).toFixed(1)}</Text>
+                  </Box>
+                  <Box width={10}>
+                    <Text color="magenta">{progressText}</Text>
+                    {skippedCount > 0 && <Text color="yellow"> ({skippedCount})</Text>}
+                  </Box>
+                  <Box width={10}>
+                    <Text>${ladderState.totalCostBasis.toFixed(2)}</Text>
+                  </Box>
+                  <Box width={10}>
+                    <Text color="cyan">${ladderState.totalSellProceeds.toFixed(2)}</Text>
+                  </Box>
                 </Box>
-                <Box width={8}>
-                  <Text>${p.entryPrice.toFixed(2)}</Text>
+              );
+            } else {
+              // Normal position display
+              const stopLoss = defaultStopLoss;
+              const potentialWin = (profitTarget - p.entryPrice) * p.shares;
+              const potentialLoss = (p.entryPrice - stopLoss) * p.shares;
+              return (
+                <Box key={i}>
+                  <Box width={6}>
+                    <Text color={p.side === "UP" ? "green" : "red"}>{p.side}</Text>
+                  </Box>
+                  <Box width={8}>
+                    <Text>${p.entryPrice.toFixed(2)}</Text>
+                  </Box>
+                  <Box width={8}>
+                    <Text>{p.shares.toFixed(1)}</Text>
+                  </Box>
+                  <Box width={8}>
+                    <Text color="red">${stopLoss.toFixed(2)}</Text>
+                  </Box>
+                  <Box width={10}>
+                    <Text color="green">+${potentialWin.toFixed(2)}</Text>
+                  </Box>
+                  <Box width={10}>
+                    <Text color="red">-${potentialLoss.toFixed(2)}</Text>
+                  </Box>
                 </Box>
-                <Box width={8}>
-                  <Text>{p.shares.toFixed(1)}</Text>
-                </Box>
-                <Box width={8}>
-                  <Text color="red">${stopLoss.toFixed(2)}</Text>
-                </Box>
-                <Box width={10}>
-                  <Text color="green">+${potentialWin.toFixed(2)}</Text>
-                </Box>
-                <Box width={10}>
-                  <Text color="red">-${potentialLoss.toFixed(2)}</Text>
-                </Box>
-              </Box>
-            );
+              );
+            }
           })
         )}
       </Box>

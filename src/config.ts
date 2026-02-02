@@ -2,7 +2,7 @@ import { watch, existsSync, readFileSync, writeFileSync } from "fs";
 import { EventEmitter } from "events";
 import type { SignatureType } from "./trader";
 
-// Mode-specific trading parameters
+// Mode-specific trading parameters (for normal mode)
 export interface ModeConfig {
   entryThreshold: number;
   maxEntryPrice: number;
@@ -10,6 +10,29 @@ export interface ModeConfig {
   maxSpread: number;
   timeWindowMs: number;
   profitTarget: number;
+}
+
+// Ladder mode step configuration
+export interface LadderStep {
+  id: string;                    // Unique identifier (e.g., "buy1", "sell1")
+  triggerPrice: number;          // Price that triggers this step (0.01-0.99)
+  action: "buy" | "sell";        // What to do when triggered
+  sizeType: "percent" | "fixed"; // Percentage of balance or fixed USDC
+  sizeValue: number;             // Amount (50 = 50% or $50)
+  enabled: boolean;              // Toggle individual steps
+}
+
+// Ladder mode configuration
+export interface LadderModeConfig {
+  // Initial entry filters (reuse from normal mode)
+  entryThreshold: number;        // Min price to consider entry
+  maxEntryPrice: number;         // Max price for initial entry
+  maxSpread: number;             // Max bid-ask spread
+  timeWindowMs: number;          // Time before market close to enter
+
+  // Ladder-specific
+  steps: LadderStep[];           // The ladder steps array
+  globalStopLoss: number;        // Emergency exit ALL if price drops here
 }
 
 // Full trading config file structure
@@ -30,7 +53,7 @@ export interface TradingConfigFile {
   };
   activeMode: string;
   modes: {
-    [key: string]: ModeConfig;
+    [key: string]: ModeConfig | LadderModeConfig;
   };
   backtest: {
     mode: string;
@@ -132,6 +155,92 @@ function validateModeConfig(modeName: string, mode: ModeConfig): ValidationError
   return errors;
 }
 
+// Validate a ladder mode configuration
+function validateLadderModeConfig(modeName: string, mode: LadderModeConfig): ValidationError[] {
+  const errors: ValidationError[] = [];
+  const prefix = `modes.${modeName}`;
+
+  // Entry filter validations
+  if (!validateRange(mode.entryThreshold, 0.01, 0.99)) {
+    errors.push({ path: `${prefix}.entryThreshold`, message: "must be between 0.01 and 0.99" });
+  }
+  if (!validateRange(mode.maxEntryPrice, 0.01, 0.99)) {
+    errors.push({ path: `${prefix}.maxEntryPrice`, message: "must be between 0.01 and 0.99" });
+  }
+  if (!validateRange(mode.maxSpread, 0, 0.5)) {
+    errors.push({ path: `${prefix}.maxSpread`, message: "must be between 0 and 0.5" });
+  }
+  if (mode.timeWindowMs <= 0) {
+    errors.push({ path: `${prefix}.timeWindowMs`, message: "must be positive" });
+  }
+  if (mode.entryThreshold > mode.maxEntryPrice) {
+    errors.push({ path: `${prefix}.entryThreshold`, message: "must be <= maxEntryPrice" });
+  }
+
+  // Global stop-loss validation
+  if (!validateRange(mode.globalStopLoss, 0.01, 0.99)) {
+    errors.push({ path: `${prefix}.globalStopLoss`, message: "must be between 0.01 and 0.99" });
+  }
+  if (mode.globalStopLoss >= mode.entryThreshold) {
+    errors.push({ path: `${prefix}.globalStopLoss`, message: "must be less than entryThreshold" });
+  }
+
+  // Steps validation
+  if (!Array.isArray(mode.steps) || mode.steps.length === 0) {
+    errors.push({ path: `${prefix}.steps`, message: "must have at least one step" });
+  } else {
+    const stepIds = new Set<string>();
+    for (let i = 0; i < mode.steps.length; i++) {
+      const step = mode.steps[i];
+      const stepPrefix = `${prefix}.steps[${i}]`;
+
+      // ID validation
+      if (!step.id || typeof step.id !== "string" || step.id.trim() === "") {
+        errors.push({ path: `${stepPrefix}.id`, message: "must be a non-empty string" });
+      } else if (stepIds.has(step.id)) {
+        errors.push({ path: `${stepPrefix}.id`, message: `duplicate step ID "${step.id}"` });
+      } else {
+        stepIds.add(step.id);
+      }
+
+      // Trigger price validation
+      if (!validateRange(step.triggerPrice, 0.01, 0.99)) {
+        errors.push({ path: `${stepPrefix}.triggerPrice`, message: "must be between 0.01 and 0.99" });
+      }
+
+      // Action validation
+      if (step.action !== "buy" && step.action !== "sell") {
+        errors.push({ path: `${stepPrefix}.action`, message: 'must be "buy" or "sell"' });
+      }
+
+      // Size type validation
+      if (step.sizeType !== "percent" && step.sizeType !== "fixed") {
+        errors.push({ path: `${stepPrefix}.sizeType`, message: 'must be "percent" or "fixed"' });
+      }
+
+      // Size value validation
+      if (step.sizeValue <= 0) {
+        errors.push({ path: `${stepPrefix}.sizeValue`, message: "must be positive" });
+      }
+      if (step.sizeType === "percent" && step.sizeValue > 100) {
+        errors.push({ path: `${stepPrefix}.sizeValue`, message: "percent value must be <= 100" });
+      }
+
+      // Enabled validation (should be boolean)
+      if (typeof step.enabled !== "boolean") {
+        errors.push({ path: `${stepPrefix}.enabled`, message: "must be a boolean" });
+      }
+    }
+  }
+
+  return errors;
+}
+
+// Check if a mode config is a ladder mode
+function isLadderModeConfig(mode: ModeConfig | LadderModeConfig): mode is LadderModeConfig {
+  return "steps" in mode && Array.isArray((mode as LadderModeConfig).steps);
+}
+
 // Validate full configuration
 function validateConfig(config: TradingConfigFile): ValidationError[] {
   const errors: ValidationError[] = [];
@@ -164,31 +273,28 @@ function validateConfig(config: TradingConfigFile): ValidationError[] {
     errors.push({ path: "profitTaking.baseBalance", message: "must be positive" });
   }
 
-  // Active mode must exist and be normal
+  // Active mode must exist
   if (!config.modes[config.activeMode]) {
     errors.push({ path: "activeMode", message: `mode "${config.activeMode}" not found in modes` });
   }
-  if (config.activeMode !== "normal") {
-    errors.push({ path: "activeMode", message: `only "normal" mode is supported (got "${config.activeMode}")` });
-  }
 
-  const modeNames = Object.keys(config.modes);
-  const nonNormalModes = modeNames.filter((mode) => mode !== "normal");
-  if (nonNormalModes.length > 0) {
-    errors.push({ path: "modes", message: `unsupported modes: ${nonNormalModes.join(", ")}` });
-  }
-
-  // Validate all modes
+  // Validate all modes (support both normal and ladder modes)
   for (const [modeName, modeConfig] of Object.entries(config.modes)) {
-    errors.push(...validateModeConfig(modeName, modeConfig));
+    if (isLadderModeConfig(modeConfig)) {
+      errors.push(...validateLadderModeConfig(modeName, modeConfig as LadderModeConfig));
+    } else {
+      errors.push(...validateModeConfig(modeName, modeConfig as ModeConfig));
+    }
   }
 
   // Backtest section
   if (!config.modes[config.backtest.mode]) {
     errors.push({ path: "backtest.mode", message: `mode "${config.backtest.mode}" not found in modes` });
   }
-  if (config.backtest.mode !== "normal") {
-    errors.push({ path: "backtest.mode", message: `only "normal" mode is supported (got "${config.backtest.mode}")` });
+  // Backtest only supports normal mode (ladder mode is for live trading only)
+  const backtestMode = config.modes[config.backtest.mode];
+  if (backtestMode && isLadderModeConfig(backtestMode)) {
+    errors.push({ path: "backtest.mode", message: "backtest does not support ladder mode, use normal mode" });
   }
   if (config.backtest.startingBalance <= 0) {
     errors.push({ path: "backtest.startingBalance", message: "must be positive" });
@@ -242,7 +348,7 @@ export type ConfigChangeEvent = {
   changedPaths: string[];
 };
 
-export type RiskMode = "normal";
+export type RiskMode = "normal" | "ladder" | string;
 
 // Legacy BotConfig interface for compatibility
 export interface BotConfig {
@@ -419,29 +525,64 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
-   * Get the active mode's configuration
+   * Get the active mode's configuration (for normal mode)
+   * Note: For ladder mode, use getLadderMode() instead
    */
   getActiveMode(): ModeConfig {
-    return this.config.modes[this.config.activeMode];
+    const mode = this.config.modes[this.config.activeMode];
+    if (isLadderModeConfig(mode)) {
+      // Return entry filter values as ModeConfig for compatibility
+      return {
+        entryThreshold: mode.entryThreshold,
+        maxEntryPrice: mode.maxEntryPrice,
+        stopLoss: mode.globalStopLoss,
+        maxSpread: mode.maxSpread,
+        timeWindowMs: mode.timeWindowMs,
+        profitTarget: 0.99, // Ladder mode doesn't use profit target, use default
+      };
+    }
+    return mode as ModeConfig;
   }
 
   /**
    * Get a specific mode's configuration
    */
-  getMode(modeName: string): ModeConfig | undefined {
+  getMode(modeName: string): ModeConfig | LadderModeConfig | undefined {
     return this.config.modes[modeName];
   }
 
   /**
+   * Check if the active mode is ladder mode
+   */
+  isLadderMode(): boolean {
+    const mode = this.config.modes[this.config.activeMode];
+    return isLadderModeConfig(mode);
+  }
+
+  /**
+   * Get the ladder mode configuration (only valid when isLadderMode() is true)
+   */
+  getLadderMode(): LadderModeConfig | null {
+    const mode = this.config.modes[this.config.activeMode];
+    if (isLadderModeConfig(mode)) {
+      return mode;
+    }
+    return null;
+  }
+
+  /**
    * Convert to legacy BotConfig interface for compatibility
+   * For ladder mode, uses entry filters and globalStopLoss
    */
   toBotConfig(): BotConfig {
-    const mode = this.getActiveMode();
+    const rawMode = this.config.modes[this.config.activeMode];
+    const isLadder = isLadderModeConfig(rawMode);
+    const mode = this.getActiveMode(); // This already converts ladder to compatible format
 
     return {
       entryThreshold: mode.entryThreshold,
       maxEntryPrice: mode.maxEntryPrice,
-      stopLoss: mode.stopLoss,
+      stopLoss: isLadder ? (rawMode as LadderModeConfig).globalStopLoss : mode.stopLoss,
       maxSpread: mode.maxSpread,
       timeWindowMs: mode.timeWindowMs,
       pollIntervalMs: this.config.trading.pollIntervalMs,
@@ -465,9 +606,15 @@ export class ConfigManager extends EventEmitter {
 
   /**
    * Get profit target for current mode
+   * For ladder mode, returns null (ladder uses step-based exits)
    */
   getProfitTarget(): number {
-    return this.getActiveMode().profitTarget;
+    const mode = this.config.modes[this.config.activeMode];
+    if (isLadderModeConfig(mode)) {
+      // Ladder mode doesn't use a single profit target, return high value
+      return 0.99;
+    }
+    return (mode as ModeConfig).profitTarget;
   }
 
   /**

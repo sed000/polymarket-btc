@@ -54,6 +54,32 @@ export function initDatabase(paperTrading: boolean): void {
     }
   }
 
+  // Add ladder mode columns (for existing DBs)
+  try {
+    db.run("ALTER TABLE trades ADD COLUMN is_ladder_trade INTEGER DEFAULT 0");
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (!errMsg.includes("duplicate column")) {
+      console.warn(`[DB] ALTER TABLE warning: ${errMsg}`);
+    }
+  }
+  try {
+    db.run("ALTER TABLE trades ADD COLUMN ladder_step_id TEXT");
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (!errMsg.includes("duplicate column")) {
+      console.warn(`[DB] ALTER TABLE warning: ${errMsg}`);
+    }
+  }
+  try {
+    db.run("ALTER TABLE trades ADD COLUMN ladder_state_json TEXT");
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (!errMsg.includes("duplicate column")) {
+      console.warn(`[DB] ALTER TABLE warning: ${errMsg}`);
+    }
+  }
+
   // Activity logs table for persistent logging
   db.run(`
     CREATE TABLE IF NOT EXISTS activity_logs (
@@ -102,6 +128,10 @@ export interface Trade {
   created_at: string;
   closed_at: string | null;
   market_end_date: string | null;
+  // Ladder mode fields
+  is_ladder_trade?: number;
+  ladder_step_id?: string | null;
+  ladder_state_json?: string | null;
 }
 
 export function insertTrade(trade: Omit<Trade, "id" | "exit_price" | "pnl" | "closed_at" | "status">): number {
@@ -153,6 +183,37 @@ export function getTradeById(id: number): Trade | null {
   const database = ensureDb();
   const stmt = database.prepare("SELECT * FROM trades WHERE id = ?");
   return stmt.get(id) as Trade | null;
+}
+
+/**
+ * Update a trade's ladder state JSON
+ * Used to persist ladder progress for recovery
+ */
+export function updateLadderState(tradeId: number, stateJson: string): void {
+  try {
+    const database = ensureDb();
+    const stmt = database.prepare(`
+      UPDATE trades SET ladder_state_json = ? WHERE id = ?
+    `);
+    stmt.run(stateJson, tradeId);
+  } catch (err) {
+    console.error(`[DB] Failed to update ladder state for trade ${tradeId}: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+/**
+ * Mark a trade as a ladder trade with its step ID
+ */
+export function markAsLadderTrade(tradeId: number, stepId: string): void {
+  try {
+    const database = ensureDb();
+    const stmt = database.prepare(`
+      UPDATE trades SET is_ladder_trade = 1, ladder_step_id = ? WHERE id = ?
+    `);
+    stmt.run(stepId, tradeId);
+  } catch (err) {
+    console.error(`[DB] Failed to mark trade ${tradeId} as ladder: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 export function getOpenTrades(): Trade[] {
