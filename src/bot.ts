@@ -1552,15 +1552,20 @@ export class Bot {
       ladderState.lastStepTime = Date.now();
       ladderState.lastStepPrice = bidPrice;
 
-      // Check if all shares have been sold
-      if (ladderState.totalSharesSold >= ladderState.totalShares * 0.99) {
-        ladderState.status = "completed";
-        const totalPnl = ladderState.totalSellProceeds - ladderState.totalCostBasis;
-        this.log(`[LADDER] All shares sold. Total PnL: $${totalPnl.toFixed(2)}`, {
+      // Log that this sell step completed - ladder continues to next step
+      const remainingAfterSell = ladderState.totalShares - ladderState.totalSharesSold;
+      if (remainingAfterSell < 0.01) {
+        const stepPnl = ladderState.totalSellProceeds - ladderState.totalCostBasis;
+        this.log(`[LADDER] Sell step "${step.id}" completed. Cycle PnL: $${stepPnl.toFixed(2)}. Ready for next buy step.`, {
           marketSlug: ladderState.marketSlug,
           tokenId
         });
-        this.state.ladderStates.delete(tokenId);
+        // Reset for next buy/sell cycle but keep ladder active
+        ladderState.totalShares = 0;
+        ladderState.totalCostBasis = 0;
+        ladderState.totalSharesSold = 0;
+        ladderState.totalSellProceeds = 0;
+        ladderState.tradeIds = [];
       }
 
     } finally {
