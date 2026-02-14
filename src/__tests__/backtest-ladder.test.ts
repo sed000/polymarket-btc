@@ -3,13 +3,13 @@ import { runBacktest } from "../backtest/engine";
 import type { BacktestConfig, HistoricalMarket, PriceTick } from "../backtest/types";
 
 const BASE_START = new Date("2024-01-01T00:00:00Z");
-const BASE_END = new Date("2024-01-01T00:15:00Z");
+const BASE_END = new Date("2024-01-01T00:05:00Z");
 
 function makeTick(timestamp: number, bid: number, ask: number): PriceTick {
   return {
     timestamp,
     tokenId: "UP",
-    marketSlug: "btc-updown-15m-1",
+    marketSlug: "btc-updown-5m-1",
     bestBid: bid,
     bestAsk: ask,
     midPrice: (bid + ask) / 2,
@@ -18,7 +18,7 @@ function makeTick(timestamp: number, bid: number, ask: number): PriceTick {
 
 function makeMarket(ticks: PriceTick[], outcome: "UP" | "DOWN" | null = null): HistoricalMarket {
   return {
-    slug: "btc-updown-15m-1",
+    slug: "btc-updown-5m-1",
     question: "BTC up or down?",
     startDate: BASE_START,
     endDate: BASE_END,
@@ -35,7 +35,7 @@ function makeConfig(): BacktestConfig {
     maxEntryPrice: 0.9,
     stopLoss: 0.4,
     maxSpread: 0.05,
-    timeWindowMs: 15 * 60 * 1000,
+    timeWindowMs: 5 * 60 * 1000,
     profitTarget: 0.99,
     startingBalance: 100,
     startDate: BASE_START,
@@ -111,11 +111,11 @@ describe("Backtest ladder mode", () => {
       makeTick(BASE_START.getTime() + 60_000, 0.64, 0.65),
       makeTick(BASE_START.getTime() + 120_000, 0.59, 0.60),
       makeTick(BASE_START.getTime() + 180_000, 0.39, 0.40),
-      makeTick(BASE_START.getTime() + 240_000, 0.57, 0.58),
-      makeTick(BASE_START.getTime() + 300_000, 0.70, 0.71),
-      makeTick(BASE_START.getTime() + 360_000, 0.61, 0.62),
-      makeTick(BASE_START.getTime() + 420_000, 0.59, 0.60),
-      makeTick(BASE_START.getTime() + 480_000, 0.70, 0.71),
+      makeTick(BASE_START.getTime() + 210_000, 0.57, 0.58),
+      makeTick(BASE_START.getTime() + 240_000, 0.70, 0.71),
+      makeTick(BASE_START.getTime() + 270_000, 0.61, 0.62),
+      makeTick(BASE_START.getTime() + 295_000, 0.59, 0.60),
+      makeTick(BASE_START.getTime() + 299_000, 0.70, 0.71),
     ];
     const market = makeMarket(ticks);
     const result = runBacktest(makeConfig(), [market]);

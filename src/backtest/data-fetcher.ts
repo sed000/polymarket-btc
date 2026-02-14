@@ -30,20 +30,20 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Generate all market slugs for BTC 15-min markets in a date range
+ * Generate all market slugs for BTC 5-minute markets in a date range
  */
 export function generateMarketSlugs(startDate: Date, endDate: Date): string[] {
   const slugs: string[] = [];
-  const intervalSec = 15 * 60; // 15 minutes
+  const intervalSec = 5 * 60; // 5 minutes
 
-  // Round start to nearest 15-min interval
+  // Round start to nearest 5-minute interval
   const startTs = Math.floor(startDate.getTime() / 1000);
   const endTs = Math.floor(endDate.getTime() / 1000);
 
   const firstInterval = Math.ceil(startTs / intervalSec) * intervalSec;
 
   for (let ts = firstInterval; ts <= endTs; ts += intervalSec) {
-    slugs.push(`btc-updown-15m-${ts}`);
+    slugs.push(`btc-updown-5m-${ts}`);
   }
 
   return slugs;
@@ -248,8 +248,8 @@ export async function fetchMarketData(
     return null;
   }
 
-  // Calculate market start time (15 min before end)
-  const startDate = new Date(marketMeta.endDate.getTime() - 15 * 60 * 1000);
+  // Calculate market start time (5 min before end)
+  const startDate = new Date(marketMeta.endDate.getTime() - 5 * 60 * 1000);
   const startTs = Math.floor(startDate.getTime() / 1000);
   const endTs = Math.floor(marketMeta.endDate.getTime() / 1000);
 

@@ -147,7 +147,7 @@ describe("Database", () => {
   describe("insertTrade", () => {
     test("inserts a trade and returns ID", () => {
       const id = insertTestTrade(db, {
-        market_slug: "btc-updown-15m-1234567890",
+        market_slug: "btc-updown-5m-1234567890",
         token_id: "token_abc",
         side: "UP",
         entry_price: 0.95,
@@ -161,7 +161,7 @@ describe("Database", () => {
 
       const trade = getTestTradeById(db, id);
       expect(trade).not.toBeNull();
-      expect(trade?.market_slug).toBe("btc-updown-15m-1234567890");
+      expect(trade?.market_slug).toBe("btc-updown-5m-1234567890");
       expect(trade?.side).toBe("UP");
       expect(trade?.entry_price).toBe(0.95);
       expect(trade?.status).toBe("OPEN");
@@ -288,7 +288,7 @@ describe("Database", () => {
   });
 
   describe("getLastClosedTrade", () => {
-    test("returns most recently closed trade", () => {
+    test("returns most recently closed trade", async () => {
       const id1 = insertTestTrade(db, {
         market_slug: "market1",
         token_id: "token1",
@@ -313,6 +313,7 @@ describe("Database", () => {
 
       closeTestTrade(db, id1, 0.99, "RESOLVED");
       // Small delay to ensure different timestamps
+      await new Promise(resolve => setTimeout(resolve, 2));
       closeTestTrade(db, id2, 0.95, "RESOLVED");
 
       const lastClosed = getTestLastClosedTrade(db);

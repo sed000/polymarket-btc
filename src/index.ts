@@ -79,9 +79,10 @@ async function main() {
   // Initialize database based on mode
   initDatabase(config.paperTrading);
 
-  // In paper trading mode, use a placeholder key (no real transactions)
+  // In paper trading mode, use a syntactically valid dummy key (no real transactions)
   // For real trading, PRIVATE_KEY is validated at startup
-  const privateKey = PRIVATE_KEY || "paper-trading-mode";
+  const PAPER_DUMMY_PRIVATE_KEY = "0x59c6995e998f97a5a0044966f094538e9dc9e86dae88c7a8412f58e3d3fdbb64";
+  const privateKey = PRIVATE_KEY || PAPER_DUMMY_PRIVATE_KEY;
 
   bot = new Bot(privateKey, configManager, () => {
     // Logs are handled by UI

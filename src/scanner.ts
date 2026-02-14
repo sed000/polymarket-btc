@@ -38,17 +38,17 @@ export interface EligibleMarket {
   eligibleSide: "UP" | "DOWN" | null;
 }
 
-export async function fetchBtc15MinMarkets(): Promise<Market[]> {
+export async function fetchBtc5MinMarkets(): Promise<Market[]> {
   const markets: Market[] = [];
 
   const nowSec = Math.floor(Date.now() / 1000);
-  const intervalSec = 15 * 60;
+  const intervalSec = 5 * 60;
   const currentIntervalStart = Math.floor(nowSec / intervalSec) * intervalSec;
 
   // Fetch current and next interval
   for (let i = 0; i < 2; i++) {
     const timestamp = currentIntervalStart + (i * intervalSec);
-    const slug = `btc-updown-15m-${timestamp}`;
+    const slug = `btc-updown-5m-${timestamp}`;
 
     try {
       // Rate limit API calls
