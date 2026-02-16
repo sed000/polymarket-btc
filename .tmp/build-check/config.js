@@ -1,115 +1,66 @@
+// @bun
+var __create = Object.create;
+var __getProtoOf = Object.getPrototypeOf;
+var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __toESM = (mod, isNodeMode, target) => {
+  target = mod != null ? __create(__getProtoOf(mod)) : {};
+  const to = isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target;
+  for (let key of __getOwnPropNames(mod))
+    if (!__hasOwnProp.call(to, key))
+      __defProp(to, key, {
+        get: () => mod[key],
+        enumerable: true
+      });
+  return to;
+};
+var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, {
+      get: all[name],
+      enumerable: true,
+      configurable: true,
+      set: (newValue) => all[name] = () => newValue
+    });
+};
+var __require = import.meta.require;
+
+// src/config.ts
 import { watch, existsSync, readFileSync, writeFileSync } from "fs";
 import { EventEmitter } from "events";
-import type { SignatureType } from "./trader";
-
-// Mode-specific trading parameters (for normal mode)
-export interface ModeConfig {
-  entryThreshold: number;
-  maxEntryPrice: number;
-  stopLoss: number;
-  maxSpread: number;
-  timeWindowMs: number;
-  profitTarget: number;
-}
-
-// Ladder mode step configuration
-export interface LadderStepSideConfig {
-  triggerPrice: number;          // Price that triggers this side (0.01-0.99)
-  sizeType: "percent" | "fixed"; // Percentage of balance or fixed USDC
-  sizeValue: number;             // Amount (50 = 50% or $50)
-}
-
-export interface LadderStep {
-  id: string;                    // Unique identifier (e.g., "step1")
-  stopLoss: number;              // Stop-loss price for this step (0.01-0.99)
-  buy: LadderStepSideConfig;     // Buy-side config
-  sell: LadderStepSideConfig;    // Sell-side config
-  enabled: boolean;              // Toggle individual steps
-}
-
-// Ladder mode configuration
-export interface LadderModeConfig {
-  // Initial entry filters (reuse from normal mode)
-  entryThreshold: number;        // Min price to consider entry
-  maxEntryPrice: number;         // Max price for initial entry
-  maxSpread: number;             // Max bid-ask spread
-  timeWindowMs: number;          // Time before market close to enter
-
-  // Ladder-specific
-  steps: LadderStep[];           // The ladder steps array
-}
-
-// Full trading config file structure
-export type WsEntryPolicy = "pause" | "rest_fallback" | "gamma_fallback";
-
-export interface TradingConfigFile {
-  trading: {
-    paperTrading: boolean;
-    paperBalance: number;
-    maxPositions: number;
-    pollIntervalMs: number;
-  };
-  wallet: {
-    signatureType: SignatureType;
-    funderAddress: string | null;
-  };
-  profitTaking: {
-    compoundLimit: number;
-    baseBalance: number;
-  };
-  activeMode: string;
-  modes: {
-    [key: string]: ModeConfig | LadderModeConfig;
-  };
-  backtest: {
-    mode: string;
-    startingBalance: number;
-    days: number;
-    slippage: number;
-  };
-  advanced: {
-    wsPriceMaxAgeMs: number;
-    marketRefreshInterval: number;
-    paperFeeRate: number;
-    wsEntryPolicy: WsEntryPolicy;
-    criticalClobRps: number;
-    backgroundClobRps: number;
-    exitRetryBackoffMs: number[];
-  };
-}
-
-// Default configuration
-const DEFAULT_CONFIG: TradingConfigFile = {
+var DEFAULT_CONFIG = {
   trading: {
     paperTrading: true,
     paperBalance: 100,
     maxPositions: 1,
-    pollIntervalMs: 10000,
+    pollIntervalMs: 1e4
   },
   wallet: {
     signatureType: 0,
-    funderAddress: null,
+    funderAddress: null
   },
   profitTaking: {
     compoundLimit: 0,
-    baseBalance: 10,
+    baseBalance: 10
   },
   activeMode: "normal",
   modes: {
     normal: {
       entryThreshold: 0.95,
       maxEntryPrice: 0.98,
-      stopLoss: 0.80,
+      stopLoss: 0.8,
       maxSpread: 0.03,
       timeWindowMs: 300000,
-      profitTarget: 0.99,
-    },
+      profitTarget: 0.99
+    }
   },
   backtest: {
     mode: "normal",
     startingBalance: 100,
     days: 7,
-    slippage: 0.001,
+    slippage: 0.001
   },
   advanced: {
     wsPriceMaxAgeMs: 5000,
@@ -119,23 +70,12 @@ const DEFAULT_CONFIG: TradingConfigFile = {
     criticalClobRps: 6,
     backgroundClobRps: 4,
     exitRetryBackoffMs: [250, 500, 1000]
-  },
+  }
 };
-
-// Validation helpers
-const validateRange = (val: number, min: number, max: number): boolean =>
-  !isNaN(val) && val >= min && val <= max;
-
-export interface ValidationError {
-  path: string;
-  message: string;
-}
-
-// Validate a mode configuration
-function validateModeConfig(modeName: string, mode: ModeConfig): ValidationError[] {
-  const errors: ValidationError[] = [];
+var validateRange = (val, min, max) => !isNaN(val) && val >= min && val <= max;
+function validateModeConfig(modeName, mode) {
+  const errors = [];
   const prefix = `modes.${modeName}`;
-
   if (!validateRange(mode.entryThreshold, 0.01, 0.99)) {
     errors.push({ path: `${prefix}.entryThreshold`, message: "must be between 0.01 and 0.99" });
   }
@@ -154,8 +94,6 @@ function validateModeConfig(modeName: string, mode: ModeConfig): ValidationError
   if (mode.timeWindowMs <= 0) {
     errors.push({ path: `${prefix}.timeWindowMs`, message: "must be positive" });
   }
-
-  // Logical validations
   if (mode.stopLoss >= mode.entryThreshold) {
     errors.push({ path: `${prefix}.stopLoss`, message: "must be less than entryThreshold" });
   }
@@ -165,16 +103,11 @@ function validateModeConfig(modeName: string, mode: ModeConfig): ValidationError
   if (mode.maxEntryPrice >= mode.profitTarget) {
     errors.push({ path: `${prefix}.maxEntryPrice`, message: "must be less than profitTarget" });
   }
-
   return errors;
 }
-
-// Validate a ladder mode configuration
-function validateLadderModeConfig(modeName: string, mode: LadderModeConfig): ValidationError[] {
-  const errors: ValidationError[] = [];
+function validateLadderModeConfig(modeName, mode) {
+  const errors = [];
   const prefix = `modes.${modeName}`;
-
-  // Entry filter validations
   if (!validateRange(mode.entryThreshold, 0.01, 0.99)) {
     errors.push({ path: `${prefix}.entryThreshold`, message: "must be between 0.01 and 0.99" });
   }
@@ -190,22 +123,17 @@ function validateLadderModeConfig(modeName: string, mode: LadderModeConfig): Val
   if (mode.entryThreshold > mode.maxEntryPrice) {
     errors.push({ path: `${prefix}.entryThreshold`, message: "must be <= maxEntryPrice" });
   }
-
-  // Steps validation
   if (!Array.isArray(mode.steps) || mode.steps.length === 0) {
     errors.push({ path: `${prefix}.steps`, message: "must have at least one step" });
   } else {
-    const firstEnabledIndex = mode.steps.findIndex(step => step.enabled);
+    const firstEnabledIndex = mode.steps.findIndex((step) => step.enabled);
     if (firstEnabledIndex === -1) {
       errors.push({ path: `${prefix}.steps`, message: "must have at least one enabled step" });
     }
-
-    const stepIds = new Set<string>();
-    for (let i = 0; i < mode.steps.length; i++) {
+    const stepIds = new Set;
+    for (let i = 0;i < mode.steps.length; i++) {
       const step = mode.steps[i];
       const stepPrefix = `${prefix}.steps[${i}]`;
-
-      // ID validation
       if (!step.id || typeof step.id !== "string" || step.id.trim() === "") {
         errors.push({ path: `${stepPrefix}.id`, message: "must be a non-empty string" });
       } else if (stepIds.has(step.id)) {
@@ -213,15 +141,11 @@ function validateLadderModeConfig(modeName: string, mode: LadderModeConfig): Val
       } else {
         stepIds.add(step.id);
       }
-
-      // Stop-loss validation
       if (!validateRange(step.stopLoss, 0.01, 0.99)) {
         errors.push({ path: `${stepPrefix}.stopLoss`, message: "must be between 0.01 and 0.99" });
       } else if (step.buy && step.stopLoss >= step.buy.triggerPrice) {
         errors.push({ path: `${stepPrefix}.stopLoss`, message: "must be less than buy.triggerPrice" });
       }
-
-      // Buy config validation
       if (!step.buy || typeof step.buy !== "object") {
         errors.push({ path: `${stepPrefix}.buy`, message: "buy config is required" });
       } else {
@@ -238,8 +162,6 @@ function validateLadderModeConfig(modeName: string, mode: LadderModeConfig): Val
           errors.push({ path: `${stepPrefix}.buy.sizeValue`, message: "percent value must be <= 100" });
         }
       }
-
-      // Sell config validation
       if (!step.sell || typeof step.sell !== "object") {
         errors.push({ path: `${stepPrefix}.sell`, message: "sell config is required" });
       } else {
@@ -256,27 +178,18 @@ function validateLadderModeConfig(modeName: string, mode: LadderModeConfig): Val
           errors.push({ path: `${stepPrefix}.sell.sizeValue`, message: "percent value must be <= 100" });
         }
       }
-
-      // Enabled validation (should be boolean)
       if (typeof step.enabled !== "boolean") {
         errors.push({ path: `${stepPrefix}.enabled`, message: "must be a boolean" });
       }
     }
   }
-
   return errors;
 }
-
-// Check if a mode config is a ladder mode
-function isLadderModeConfig(mode: ModeConfig | LadderModeConfig): mode is LadderModeConfig {
-  return "steps" in mode && Array.isArray((mode as LadderModeConfig).steps);
+function isLadderModeConfig(mode) {
+  return "steps" in mode && Array.isArray(mode.steps);
 }
-
-// Validate full configuration
-function validateConfig(config: TradingConfigFile): ValidationError[] {
-  const errors: ValidationError[] = [];
-
-  // Trading section
+function validateConfig(config) {
+  const errors = [];
   if (config.trading.paperBalance <= 0) {
     errors.push({ path: "trading.paperBalance", message: "must be positive" });
   }
@@ -286,39 +199,29 @@ function validateConfig(config: TradingConfigFile): ValidationError[] {
   if (config.trading.pollIntervalMs < 1000) {
     errors.push({ path: "trading.pollIntervalMs", message: "must be at least 1000ms" });
   }
-
-  // Wallet section
-  const validSigTypes: SignatureType[] = [0, 1, 2];
+  const validSigTypes = [0, 1, 2];
   if (!validSigTypes.includes(config.wallet.signatureType)) {
     errors.push({ path: "wallet.signatureType", message: "must be 0, 1, or 2" });
   }
   if (config.wallet.signatureType === 1 && !config.wallet.funderAddress && !config.trading.paperTrading) {
     errors.push({ path: "wallet.funderAddress", message: "required when signatureType is 1 (Magic.link proxy)" });
   }
-
-  // Profit taking section
   if (config.profitTaking.compoundLimit < 0) {
     errors.push({ path: "profitTaking.compoundLimit", message: "must be >= 0 (0 disables)" });
   }
   if (config.profitTaking.baseBalance <= 0) {
     errors.push({ path: "profitTaking.baseBalance", message: "must be positive" });
   }
-
-  // Active mode must exist
   if (!config.modes[config.activeMode]) {
     errors.push({ path: "activeMode", message: `mode "${config.activeMode}" not found in modes` });
   }
-
-  // Validate all modes (support both normal and ladder modes)
   for (const [modeName, modeConfig] of Object.entries(config.modes)) {
     if (isLadderModeConfig(modeConfig)) {
-      errors.push(...validateLadderModeConfig(modeName, modeConfig as LadderModeConfig));
+      errors.push(...validateLadderModeConfig(modeName, modeConfig));
     } else {
-      errors.push(...validateModeConfig(modeName, modeConfig as ModeConfig));
+      errors.push(...validateModeConfig(modeName, modeConfig));
     }
   }
-
-  // Backtest section
   if (!config.modes[config.backtest.mode]) {
     errors.push({ path: "backtest.mode", message: `mode "${config.backtest.mode}" not found in modes` });
   }
@@ -331,8 +234,6 @@ function validateConfig(config: TradingConfigFile): ValidationError[] {
   if (!validateRange(config.backtest.slippage, 0, 0.1)) {
     errors.push({ path: "backtest.slippage", message: "must be between 0 and 0.1" });
   }
-
-  // Advanced section
   if (config.advanced.wsPriceMaxAgeMs < 1000) {
     errors.push({ path: "advanced.wsPriceMaxAgeMs", message: "must be at least 1000ms" });
   }
@@ -342,7 +243,7 @@ function validateConfig(config: TradingConfigFile): ValidationError[] {
   if (!validateRange(config.advanced.paperFeeRate, 0, 0.1)) {
     errors.push({ path: "advanced.paperFeeRate", message: "must be between 0 and 0.1" });
   }
-  const validWsEntryPolicies: WsEntryPolicy[] = ["pause", "rest_fallback", "gamma_fallback"];
+  const validWsEntryPolicies = ["pause", "rest_fallback", "gamma_fallback"];
   if (!validWsEntryPolicies.includes(config.advanced.wsEntryPolicy)) {
     errors.push({ path: "advanced.wsEntryPolicy", message: 'must be "pause", "rest_fallback", or "gamma_fallback"' });
   }
@@ -355,93 +256,50 @@ function validateConfig(config: TradingConfigFile): ValidationError[] {
   if (!Array.isArray(config.advanced.exitRetryBackoffMs) || config.advanced.exitRetryBackoffMs.length === 0) {
     errors.push({ path: "advanced.exitRetryBackoffMs", message: "must be a non-empty array" });
   } else {
-    for (let i = 0; i < config.advanced.exitRetryBackoffMs.length; i++) {
+    for (let i = 0;i < config.advanced.exitRetryBackoffMs.length; i++) {
       const value = config.advanced.exitRetryBackoffMs[i];
       if (!Number.isFinite(value) || value < 10 || value > 60000) {
         errors.push({ path: `advanced.exitRetryBackoffMs[${i}]`, message: "must be between 10 and 60000 ms" });
       }
     }
   }
-
   return errors;
 }
-
-// Deep merge utility
-function deepMerge<T extends object>(target: T, source: Partial<T>): T {
+function deepMerge(target, source) {
   const result = { ...target };
-  for (const key of Object.keys(source) as (keyof T)[]) {
+  for (const key of Object.keys(source)) {
     const sourceVal = source[key];
     if (sourceVal !== undefined) {
-      if (
-        typeof sourceVal === "object" &&
-        sourceVal !== null &&
-        !Array.isArray(sourceVal) &&
-        typeof result[key] === "object" &&
-        result[key] !== null
-      ) {
-        result[key] = deepMerge(result[key] as object, sourceVal as object) as T[keyof T];
+      if (typeof sourceVal === "object" && sourceVal !== null && !Array.isArray(sourceVal) && typeof result[key] === "object" && result[key] !== null) {
+        result[key] = deepMerge(result[key], sourceVal);
       } else {
-        result[key] = sourceVal as T[keyof T];
+        result[key] = sourceVal;
       }
     }
   }
   return result;
 }
 
-export type ConfigChangeEvent = {
-  previous: TradingConfigFile;
-  current: TradingConfigFile;
-  changedPaths: string[];
-};
-
-export type RiskMode = "normal" | "ladder" | string;
-
-// Legacy BotConfig interface for compatibility
-export interface BotConfig {
-  entryThreshold: number;
-  maxEntryPrice: number;
-  stopLoss: number;
-  maxSpread: number;
-  timeWindowMs: number;
-  pollIntervalMs: number;
-  paperTrading: boolean;
-  paperBalance: number;
-  riskMode: RiskMode;
-  compoundLimit: number;
-  baseBalance: number;
-  signatureType: SignatureType;
-  funderAddress?: string;
-  maxPositions: number;
-}
-
-export class ConfigManager extends EventEmitter {
-  private config: TradingConfigFile;
-  private configPath: string;
-  private watcher: ReturnType<typeof watch> | null = null;
-  private debounceTimer: Timer | null = null;
-
-  constructor(configPath: string = "trading.config.json") {
+class ConfigManager extends EventEmitter {
+  config;
+  configPath;
+  watcher = null;
+  debounceTimer = null;
+  constructor(configPath = "trading.config.json") {
     super();
     this.configPath = configPath;
     this.config = this.loadConfig();
   }
-
-  private loadConfig(): TradingConfigFile {
+  loadConfig() {
     if (!existsSync(this.configPath)) {
-      // Create default config file
       console.log(`Creating default config file: ${this.configPath}`);
       writeFileSync(this.configPath, JSON.stringify(DEFAULT_CONFIG, null, 2));
       return structuredClone(DEFAULT_CONFIG);
     }
-
     try {
       const content = readFileSync(this.configPath, "utf-8");
-      const parsed = JSON.parse(content) as Partial<TradingConfigFile>;
-
-      // Merge with defaults to ensure all fields exist
+      const parsed = JSON.parse(content);
       const merged = deepMerge(structuredClone(DEFAULT_CONFIG), parsed);
-
-      // Validate
       const errors = validateConfig(merged);
       if (errors.length > 0) {
         console.error("Configuration errors:");
@@ -450,7 +308,6 @@ export class ConfigManager extends EventEmitter {
         }
         throw new Error("Invalid configuration");
       }
-
       return merged;
     } catch (err) {
       if (err instanceof SyntaxError) {
@@ -460,16 +317,11 @@ export class ConfigManager extends EventEmitter {
       throw err;
     }
   }
-
-  /**
-   * Start watching the config file for changes
-   */
-  startWatching(): void {
-    if (this.watcher) return;
-
+  startWatching() {
+    if (this.watcher)
+      return;
     this.watcher = watch(this.configPath, (eventType) => {
       if (eventType === "change") {
-        // Debounce to avoid rapid reloads
         if (this.debounceTimer) {
           clearTimeout(this.debounceTimer);
         }
@@ -479,11 +331,7 @@ export class ConfigManager extends EventEmitter {
       }
     });
   }
-
-  /**
-   * Stop watching the config file
-   */
-  stopWatching(): void {
+  stopWatching() {
     if (this.watcher) {
       this.watcher.close();
       this.watcher = null;
@@ -493,34 +341,22 @@ export class ConfigManager extends EventEmitter {
       this.debounceTimer = null;
     }
   }
-
-  /**
-   * Reload configuration from file
-   * Returns true if config changed, false otherwise
-   */
-  private reloadConfig(): boolean {
+  reloadConfig() {
     try {
       const previous = this.config;
       const newConfig = this.loadConfig();
-
-      // Find changed paths
       const changedPaths = this.findChangedPaths(previous, newConfig);
-
       if (changedPaths.length === 0) {
         return false;
       }
-
       this.config = newConfig;
-
-      const event: ConfigChangeEvent = {
+      const event = {
         previous,
         current: newConfig,
-        changedPaths,
+        changedPaths
       };
-
       this.emit("change", event);
       console.log(`[CONFIG] Reloaded: ${changedPaths.join(", ")}`);
-
       return true;
     } catch (err) {
       console.error(`[CONFIG] Failed to reload: ${err instanceof Error ? err.message : err}`);
@@ -528,107 +364,63 @@ export class ConfigManager extends EventEmitter {
       return false;
     }
   }
-
-  /**
-   * Find paths that changed between two configs
-   */
-  private findChangedPaths(
-    prev: TradingConfigFile,
-    next: TradingConfigFile,
-    prefix = ""
-  ): string[] {
-    const changes: string[] = [];
-
+  findChangedPaths(prev, next, prefix = "") {
+    const changes = [];
     const allKeys = new Set([...Object.keys(prev), ...Object.keys(next)]);
-
     for (const key of allKeys) {
       const path = prefix ? `${prefix}.${key}` : key;
-      const prevVal = (prev as any)[key];
-      const nextVal = (next as any)[key];
-
+      const prevVal = prev[key];
+      const nextVal = next[key];
       if (typeof prevVal === "object" && typeof nextVal === "object" && prevVal !== null && nextVal !== null) {
         changes.push(...this.findChangedPaths(prevVal, nextVal, path));
       } else if (prevVal !== nextVal) {
         changes.push(path);
       }
     }
-
     return changes;
   }
-
-  /**
-   * Get the full configuration
-   */
-  getConfig(): TradingConfigFile {
+  getConfig() {
     return this.config;
   }
-
-  /**
-   * Get the active mode name
-   */
-  getActiveModeName(): string {
+  getActiveModeName() {
     return this.config.activeMode;
   }
-
-  /**
-   * Get the active mode's configuration (for normal mode)
-   * Note: For ladder mode, use getLadderMode() instead
-   */
-  getActiveMode(): ModeConfig {
+  getActiveMode() {
     const mode = this.config.modes[this.config.activeMode];
     if (isLadderModeConfig(mode)) {
-      const firstEnabledStep = mode.steps.find(step => step.enabled);
+      const firstEnabledStep = mode.steps.find((step) => step.enabled);
       const stepStopLoss = firstEnabledStep ? firstEnabledStep.stopLoss : 0.01;
-      // Return entry filter values as ModeConfig for compatibility
       return {
         entryThreshold: mode.entryThreshold,
         maxEntryPrice: mode.maxEntryPrice,
         stopLoss: stepStopLoss,
         maxSpread: mode.maxSpread,
         timeWindowMs: mode.timeWindowMs,
-        profitTarget: 0.99, // Ladder mode doesn't use profit target, use default
+        profitTarget: 0.99
       };
     }
-    return mode as ModeConfig;
+    return mode;
   }
-
-  /**
-   * Get a specific mode's configuration
-   */
-  getMode(modeName: string): ModeConfig | LadderModeConfig | undefined {
+  getMode(modeName) {
     return this.config.modes[modeName];
   }
-
-  /**
-   * Check if the active mode is ladder mode
-   */
-  isLadderMode(): boolean {
+  isLadderMode() {
     const mode = this.config.modes[this.config.activeMode];
     return isLadderModeConfig(mode);
   }
-
-  /**
-   * Get the ladder mode configuration (only valid when isLadderMode() is true)
-   */
-  getLadderMode(): LadderModeConfig | null {
+  getLadderMode() {
     const mode = this.config.modes[this.config.activeMode];
     if (isLadderModeConfig(mode)) {
       return mode;
     }
     return null;
   }
-
-  /**
-   * Convert to legacy BotConfig interface for compatibility
-   * For ladder mode, uses entry filters and first enabled step stopLoss
-   */
-  toBotConfig(): BotConfig {
+  toBotConfig() {
     const rawMode = this.config.modes[this.config.activeMode];
     const isLadder = isLadderModeConfig(rawMode);
-    const mode = this.getActiveMode(); // This already converts ladder to compatible format
-    const firstEnabledStep = isLadder ? (rawMode as LadderModeConfig).steps.find(step => step.enabled) : null;
+    const mode = this.getActiveMode();
+    const firstEnabledStep = isLadder ? rawMode.steps.find((step) => step.enabled) : null;
     const ladderStopLoss = firstEnabledStep ? firstEnabledStep.stopLoss : mode.stopLoss;
-
     return {
       entryThreshold: mode.entryThreshold,
       maxEntryPrice: mode.maxEntryPrice,
@@ -638,83 +430,52 @@ export class ConfigManager extends EventEmitter {
       pollIntervalMs: this.config.trading.pollIntervalMs,
       paperTrading: this.config.trading.paperTrading,
       paperBalance: this.config.trading.paperBalance,
-      riskMode: this.config.activeMode as RiskMode,
+      riskMode: this.config.activeMode,
       compoundLimit: this.config.profitTaking.compoundLimit,
       baseBalance: this.config.profitTaking.baseBalance,
       signatureType: this.config.wallet.signatureType,
       funderAddress: this.config.wallet.funderAddress || undefined,
-      maxPositions: this.config.trading.maxPositions,
+      maxPositions: this.config.trading.maxPositions
     };
   }
-
-  /**
-   * Get the config file path
-   */
-  getConfigPath(): string {
+  getConfigPath() {
     return this.configPath;
   }
-
-  /**
-   * Get profit target for current mode
-   * For ladder mode, returns null (ladder uses step-based exits)
-   */
-  getProfitTarget(): number {
+  getProfitTarget() {
     const mode = this.config.modes[this.config.activeMode];
     if (isLadderModeConfig(mode)) {
-      // Ladder mode doesn't use a single profit target, return high value
       return 0.99;
     }
-    return (mode as ModeConfig).profitTarget;
+    return mode.profitTarget;
   }
-
-  /**
-   * Get advanced configuration values
-   */
-  getAdvanced(): TradingConfigFile["advanced"] {
+  getAdvanced() {
     return this.config.advanced;
   }
-
-  /**
-   * Get backtest configuration
-   */
-  getBacktestConfig(): TradingConfigFile["backtest"] {
+  getBacktestConfig() {
     return this.config.backtest;
   }
-
-  /**
-   * Register a callback for config changes
-   */
-  onConfigChange(callback: (event: ConfigChangeEvent) => void): void {
+  onConfigChange(callback) {
     this.on("change", callback);
   }
-
-  /**
-   * Register a callback for config errors
-   */
-  onConfigError(callback: (error: Error) => void): void {
+  onConfigError(callback) {
     this.on("error", callback);
   }
 }
-
-// Singleton instance for global access
-let globalConfigManager: ConfigManager | null = null;
-
-/**
- * Get or create the global ConfigManager instance
- */
-export function getConfigManager(configPath?: string): ConfigManager {
+var globalConfigManager = null;
+function getConfigManager(configPath) {
   if (!globalConfigManager) {
     globalConfigManager = new ConfigManager(configPath);
   }
   return globalConfigManager;
 }
-
-/**
- * Reset the global ConfigManager (for testing)
- */
-export function resetConfigManager(): void {
+function resetConfigManager() {
   if (globalConfigManager) {
     globalConfigManager.stopWatching();
     globalConfigManager = null;
   }
 }
+export {
+  resetConfigManager,
+  getConfigManager,
+  ConfigManager
+};

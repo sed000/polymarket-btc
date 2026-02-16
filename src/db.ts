@@ -290,7 +290,7 @@ export function getTradeStats() {
 
 export function getLastClosedTrade(): Trade | null {
   const database = ensureDb();
-  const stmt = database.prepare("SELECT * FROM trades WHERE status != 'OPEN' ORDER BY closed_at DESC LIMIT 1");
+  const stmt = database.prepare("SELECT * FROM trades WHERE status != 'OPEN' ORDER BY closed_at DESC, id DESC LIMIT 1");
   return stmt.get() as Trade | null;
 }
 
@@ -303,7 +303,7 @@ export function getLastWinningTradeInMarket(marketSlug: string, side: "UP" | "DO
   const stmt = database.prepare(`
     SELECT * FROM trades
     WHERE market_slug = ? AND side = ? AND status != 'OPEN' AND pnl > 0
-    ORDER BY closed_at DESC LIMIT 1
+    ORDER BY closed_at DESC, id DESC LIMIT 1
   `);
   return stmt.get(marketSlug, side) as Trade | null;
 }

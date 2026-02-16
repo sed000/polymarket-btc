@@ -5,8 +5,8 @@
 export class RateLimiter {
   private tokens: number;
   private lastRefill: number;
-  private readonly maxTokens: number;
-  private readonly refillRate: number; // tokens per second
+  private maxTokens: number;
+  private refillRate: number; // tokens per second
 
   constructor(maxRequestsPerSecond: number = 5) {
     this.maxTokens = maxRequestsPerSecond;
@@ -41,14 +41,32 @@ export class RateLimiter {
     this.tokens = Math.min(this.maxTokens, this.tokens + elapsed * this.refillRate);
     this.lastRefill = now;
   }
+
+  setRate(maxRequestsPerSecond: number): void {
+    const rate = Number.isFinite(maxRequestsPerSecond) ? maxRequestsPerSecond : 1;
+    const safeRate = Math.max(1, Math.floor(rate));
+    this.refillTokens();
+    this.maxTokens = safeRate;
+    this.refillRate = safeRate;
+    this.tokens = Math.min(this.tokens, this.maxTokens);
+  }
 }
 
-// Shared rate limiters for different APIs
-// Gamma API: 10 req/s limit (conservative: 5)
+// Shared rate limiters for different APIs.
 export const gammaLimiter = new RateLimiter(5);
 
-// CLOB API: 10 req/s limit (conservative: 5)
-export const clobLimiter = new RateLimiter(5);
+// CLOB API is split into critical and background lanes so exits are not queued
+// behind scans/polling.
+export const clobCriticalLimiter = new RateLimiter(6);
+export const clobBackgroundLimiter = new RateLimiter(4);
+
+// Backward-compatible alias used by older call sites.
+export const clobLimiter = clobBackgroundLimiter;
+
+export function configureClobLimiters(criticalRps: number, backgroundRps: number): void {
+  clobCriticalLimiter.setRate(criticalRps);
+  clobBackgroundLimiter.setRate(backgroundRps);
+}
 
 /**
  * Wrapper to execute a function with rate limiting

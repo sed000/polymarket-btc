@@ -10,51 +10,37 @@
     "funderAddress": null
   },
   "profitTaking": {
-    "compoundLimit": 50,
-    "baseBalance": 30
+    "compoundLimit": 0,
+    "baseBalance": 10
   },
-  "activeMode": "ladder",
+  "activeMode": "normal",
   "modes": {
     "normal": {
-      "entryThreshold": 0.95,
-      "maxEntryPrice": 0.98,
-      "stopLoss": 0.80,
+      "entryThreshold": 0.90,
+      "maxEntryPrice": 0.97,
+      "stopLoss": 0.70,
       "maxSpread": 0.03,
       "timeWindowMs": 300000,
-      "profitTarget": 0.99
+      "profitTarget": 0.98
     },
     "ladder": {
-      "entryThreshold": 0.60,
-      "maxEntryPrice": 0.90,
+      "entryThreshold": 0.65,
+      "maxEntryPrice": 0.95,
       "maxSpread": 0.03,
       "timeWindowMs": 900000,
       "steps": [
         {
           "id": "step1",
-          "stopLoss": 0.55,
-          "enabled": true,
-          "buy": { "triggerPrice": 0.70, "sizeType": "percent", "sizeValue": 100 },
-          "sell": { "triggerPrice": 0.75, "sizeType": "percent", "sizeValue": 100 }
-        },
-        {
-          "id": "step2",
-          "stopLoss": 0.65,
-          "enabled": true,
-          "buy": { "triggerPrice": 0.77, "sizeType": "percent", "sizeValue": 100 },
-          "sell": { "triggerPrice": 0.85, "sizeType": "percent", "sizeValue": 100 }
-        },
-        {
-          "id": "step3",
           "stopLoss": 0.80,
           "enabled": true,
-          "buy": { "triggerPrice": 0.88, "sizeType": "percent", "sizeValue": 100 },
-          "sell": { "triggerPrice": 0.93, "sizeType": "percent", "sizeValue": 100 }
+          "buy": { "triggerPrice": 0.94, "sizeType": "percent", "sizeValue": 100 },
+          "sell": { "triggerPrice": 0.99, "sizeType": "percent", "sizeValue": 100 }
         }
       ]
     }
   },
   "backtest": {
-    "mode": "normal",
+    "mode": "ladder",
     "startingBalance": 10,
     "days": 7,
     "slippage": 0.001

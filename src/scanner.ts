@@ -17,11 +17,15 @@ export interface Market {
   slug: string;
   question: string;
   endDate: string;
+  conditionId?: string;
   outcomes: string[];
   outcomePrices: string[];
   clobTokenIds: string[];
   active: boolean;
   closed: boolean;
+  acceptingOrders?: boolean;
+  orderMinSize?: number;
+  orderPriceMinTickSize?: number;
 }
 
 export interface EligibleMarket {
@@ -95,11 +99,17 @@ function parseMarket(event: any, market: any): Market | null {
       slug: event.slug,
       question: market.question || event.title,
       endDate: market.endDate || event.endDate,
+      conditionId: market.conditionId || market.condition_id || undefined,
       outcomes,
       outcomePrices,
       clobTokenIds,
       active: market.active !== false,
-      closed: market.closed === true
+      closed: market.closed === true,
+      acceptingOrders: market.acceptingOrders !== false,
+      orderMinSize: Number.isFinite(parseFloat(market.orderMinSize)) ? parseFloat(market.orderMinSize) : undefined,
+      orderPriceMinTickSize: Number.isFinite(parseFloat(market.orderPriceMinTickSize))
+        ? parseFloat(market.orderPriceMinTickSize)
+        : undefined
     };
   } catch (err) {
     console.warn(`[Scanner] Error parsing market: ${err instanceof Error ? err.message : err}`);
@@ -126,7 +136,8 @@ export interface MarketFilterConfig {
 export function analyzeMarket(
   market: Market,
   config: { entryThreshold: number; timeWindowMs: number; maxEntryPrice?: number; maxSpread?: number },
-  priceOverrides?: PriceOverride
+  priceOverrides?: PriceOverride,
+  allowGammaFallback: boolean = true
 ): EligibleMarket {
   const endDate = new Date(market.endDate);
   const now = new Date();
@@ -152,9 +163,8 @@ export function analyzeMarket(
     downAsk = priceOverrides[downTokenId].bestAsk;
   }
 
-  // SECURITY FIX: Fall back to Gamma API prices when WS prices unavailable
-  // This ensures entry scanning works even when WebSocket is down
-  if (upAsk === 0 && upIndex >= 0 && market.outcomePrices[upIndex]) {
+  // Optional Gamma fallback (disabled for live entry safety when WS is stale/missing).
+  if (allowGammaFallback && upAsk === 0 && upIndex >= 0 && market.outcomePrices[upIndex]) {
     const gammaPrice = parseFloat(market.outcomePrices[upIndex]);
     if (gammaPrice > 0 && gammaPrice <= 1) {
       // Gamma API returns mid-price, estimate bid/ask with small spread
@@ -162,7 +172,7 @@ export function analyzeMarket(
       upBid = Math.max(gammaPrice - 0.005, 0);
     }
   }
-  if (downAsk === 0 && downIndex >= 0 && market.outcomePrices[downIndex]) {
+  if (allowGammaFallback && downAsk === 0 && downIndex >= 0 && market.outcomePrices[downIndex]) {
     const gammaPrice = parseFloat(market.outcomePrices[downIndex]);
     if (gammaPrice > 0 && gammaPrice <= 1) {
       downAsk = Math.min(gammaPrice + 0.005, 1);
@@ -176,7 +186,7 @@ export function analyzeMarket(
   const maxEntry = config.maxEntryPrice ?? 0.99;
   const maxSpread = config.maxSpread ?? 1.0;  // Default: no spread filter
 
-  if (timeRemaining > 0 && timeRemaining <= config.timeWindowMs) {
+  if (market.acceptingOrders !== false && timeRemaining > 0 && timeRemaining <= config.timeWindowMs) {
     const upSpread = upAsk - upBid;
     const downSpread = downAsk - downBid;
 
@@ -208,9 +218,10 @@ export function analyzeMarket(
 export function findEligibleMarkets(
   markets: Market[],
   config: { entryThreshold: number; timeWindowMs: number; maxEntryPrice?: number; maxSpread?: number },
-  priceOverrides?: PriceOverride
+  priceOverrides?: PriceOverride,
+  allowGammaFallback: boolean = true
 ): EligibleMarket[] {
-  const analyzed = markets.map(m => analyzeMarket(m, config, priceOverrides));
+  const analyzed = markets.map(m => analyzeMarket(m, config, priceOverrides, allowGammaFallback));
   return analyzed.filter(m => m.eligibleSide !== null);
 }
 

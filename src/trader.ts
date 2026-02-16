@@ -1,6 +1,6 @@
-import { ClobClient, Side } from "@polymarket/clob-client";
+import { ClobClient, OrderType, Side, type TickSize } from "@polymarket/clob-client";
 import { Wallet } from "ethers";
-import { clobLimiter } from "./rate-limiter";
+import { clobBackgroundLimiter, clobCriticalLimiter } from "./rate-limiter";
 
 const CLOB_API = "https://clob.polymarket.com";
 const CHAIN_ID = 137; // Polygon
@@ -8,10 +8,8 @@ const CHAIN_ID = 137; // Polygon
 // Polymarket minimum order size in shares
 export const MIN_ORDER_SIZE = 5;
 
-// Fee rate for orders (in basis points)
-// feeRateBps: ORDER_FEE_RATE_BPS means max acceptable fee is 10% (1000/10000)
-// This is a ceiling - actual fees are typically ~1% for takers
-// The CLOB API uses this as a slippage/fee tolerance parameter
+// Legacy fee-rate constant kept for compatibility.
+// Live orders now resolve fee rates from the market dynamically.
 export const ORDER_FEE_RATE_BPS = 1000;
 
 // Signature types for different wallet types
@@ -34,6 +32,19 @@ export interface ApiCreds {
   passphrase: string;
 }
 
+export interface MarketConstraints {
+  minOrderSize: number;
+  tickSize: number;
+  feeRateBps: number;
+}
+
+export interface MarketSellResult {
+  orderIds: string[];
+  filledShares: number;
+  remainingShares: number;
+  avgPrice: number;
+}
+
 export class Trader {
   private client: ClobClient | null = null;
   private signer: Wallet;
@@ -43,6 +54,7 @@ export class Trader {
   private apiCreds: ApiCreds | null = null;
   private signatureType: SignatureType;
   private funderAddress: string | undefined;
+  private marketConstraintsCache: Map<string, { constraints: MarketConstraints; cachedAt: number }> = new Map();
 
   constructor(privateKey: string, signatureType: SignatureType = 1, funderAddress?: string) {
     this.signer = new Wallet(privateKey);
@@ -132,10 +144,69 @@ export class Trader {
     return msg.includes("balance") || msg.includes("allowance");
   }
 
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private normalizeTickSize(value: string | number | undefined): number {
+    const parsed = typeof value === "number" ? value : parseFloat(value || "0");
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return 0.01;
+    }
+    return parsed;
+  }
+
+  private normalizePriceForTick(price: number, tickSize: number): number {
+    const minPrice = tickSize;
+    const maxPrice = Math.max(minPrice, 1 - tickSize);
+    const clamped = Math.min(maxPrice, Math.max(minPrice, price));
+    return Math.round(clamped / tickSize) * tickSize;
+  }
+
+  private toTickSizeString(tickSize: number): TickSize {
+    if (tickSize >= 0.1) return "0.1";
+    if (tickSize >= 0.01) return "0.01";
+    if (tickSize >= 0.001) return "0.001";
+    return "0.0001";
+  }
+
+  async getMarketConstraints(tokenId: string, forceRefresh = false): Promise<MarketConstraints | null> {
+    const client = this.ensureClient();
+    const now = Date.now();
+    const cached = this.marketConstraintsCache.get(tokenId);
+    const cacheTtlMs = 5 * 60 * 1000;
+    if (!forceRefresh && cached && now - cached.cachedAt < cacheTtlMs) {
+      return cached.constraints;
+    }
+
+    try {
+      await clobBackgroundLimiter.acquire();
+      const book = await client.getOrderBook(tokenId);
+
+      await clobBackgroundLimiter.acquire();
+      const feeRateBps = await client.getFeeRateBps(tokenId);
+
+      const constraints: MarketConstraints = {
+        minOrderSize: parseFloat(book.min_order_size || "0") || MIN_ORDER_SIZE,
+        tickSize: this.normalizeTickSize(book.tick_size),
+        feeRateBps: Number.isFinite(feeRateBps) ? feeRateBps : 0
+      };
+      this.marketConstraintsCache.set(tokenId, { constraints, cachedAt: now });
+      return constraints;
+    } catch (err) {
+      console.error(`[Trader] Failed to fetch market constraints: ${err instanceof Error ? err.message : err}`);
+      if (cached) {
+        return cached.constraints;
+      }
+      return null;
+    }
+  }
+
   private async validateAndAdjustShares(
     tokenId: string,
     shares: number,
-    logPrefix = ""
+    logPrefix = "",
+    allowBelowMin = false
   ): Promise<number | null> {
     const positionBalance = await this.getPositionBalance(tokenId);
     const prefix = logPrefix ? `${logPrefix} ` : "";
@@ -158,8 +229,10 @@ export class Trader {
       return null;
     }
 
-    if (sharesToSell < MIN_ORDER_SIZE) {
-      console.error(`${prefix}Actual balance ${sharesToSell.toFixed(2)} below minimum ${MIN_ORDER_SIZE} shares`);
+    const constraints = await this.getMarketConstraints(tokenId);
+    const minOrderSize = constraints?.minOrderSize || MIN_ORDER_SIZE;
+    if (!allowBelowMin && sharesToSell < minOrderSize) {
+      console.error(`${prefix}Actual balance ${sharesToSell.toFixed(2)} below minimum ${minOrderSize.toFixed(2)} shares`);
       return null;
     }
 
@@ -174,7 +247,7 @@ export class Trader {
     const client = this.ensureClient();
     // Get USDC balance from the exchange
     try {
-      await clobLimiter.acquire();
+      await clobBackgroundLimiter.acquire();
       const balances = await client.getBalanceAllowance({
         asset_type: "COLLATERAL"
       });
@@ -195,7 +268,7 @@ export class Trader {
   async getPositionBalance(tokenId: string): Promise<number | null> {
     const client = this.ensureClient();
     try {
-      await clobLimiter.acquire();
+      await clobBackgroundLimiter.acquire();
       const balances = await client.getBalanceAllowance({
         asset_type: "CONDITIONAL",
         token_id: tokenId
@@ -245,7 +318,7 @@ export class Trader {
   async getPrice(tokenId: string): Promise<{ bid: number; ask: number; mid: number }> {
     const client = this.ensureClient();
     try {
-      await clobLimiter.acquire();
+      await clobCriticalLimiter.acquire();
       const book = await client.getOrderBook(tokenId);
       const bestBid = book.bids?.[0]?.price ? parseFloat(book.bids[0].price) : 0;
       const bestAsk = book.asks?.[0]?.price ? parseFloat(book.asks[0].price) : 1;
@@ -261,35 +334,46 @@ export class Trader {
 
   async buy(tokenId: string, price: number, usdcAmount: number): Promise<{ orderId: string; shares: number } | null> {
     const client = this.ensureClient();
+    const constraints = await this.getMarketConstraints(tokenId);
+    if (!constraints) {
+      console.error("Failed to load market constraints");
+      return null;
+    }
+    const tickSize = constraints.tickSize;
+    const minOrderSize = constraints.minOrderSize;
+    const safePrice = this.normalizePriceForTick(price, tickSize);
 
-    // Validate price is within Polymarket's allowed range (0.01 - 0.99)
-    if (price < 0.01 || price > 0.99) {
-      console.error(`Invalid buy price: $${price.toFixed(4)} (must be 0.01-0.99)`);
+    // Validate price against the market's tick range.
+    if (safePrice <= 0 || safePrice >= 1) {
+      console.error(`Invalid buy price: $${safePrice.toFixed(4)}`);
       return null;
     }
 
     // Calculate shares: shares = usdc / price
-    const shares = Math.floor((usdcAmount / price) * 100) / 100; // Round down to 2 decimals
+    const shares = Math.floor((usdcAmount / safePrice) * 100) / 100; // Round down to 2 decimals
 
     if (shares <= 0) {
       console.error("Insufficient funds for purchase");
       return null;
     }
 
-    // Polymarket minimum order size is 5 shares
-    if (shares < MIN_ORDER_SIZE) {
-      console.error(`Order size ${shares.toFixed(2)} below minimum ${MIN_ORDER_SIZE} shares (need $${(MIN_ORDER_SIZE * price).toFixed(2)} USDC)`);
+    if (shares < minOrderSize) {
+      console.error(
+        `Order size ${shares.toFixed(2)} below minimum ${minOrderSize.toFixed(2)} shares ` +
+        `(need $${(minOrderSize * safePrice).toFixed(2)} USDC)`
+      );
       return null;
     }
 
     try {
-      await clobLimiter.acquire();
+      await clobBackgroundLimiter.acquire();
       const response = await client.createAndPostOrder({
         tokenID: tokenId,
-        price,
+        price: safePrice,
         size: shares,
-        side: Side.BUY,
-        feeRateBps: ORDER_FEE_RATE_BPS
+        side: Side.BUY
+      }, {
+        tickSize: this.toTickSizeString(tickSize)
       });
 
       if (response.success) {
@@ -308,6 +392,13 @@ export class Trader {
 
   async limitSell(tokenId: string, shares: number, price: number, maxRetries: number = 3): Promise<{ orderId: string; price: number } | null> {
     const client = this.ensureClient();
+    const constraints = await this.getMarketConstraints(tokenId);
+    if (!constraints) {
+      console.error("Failed to load market constraints for limit sell");
+      return null;
+    }
+    const tickSize = constraints.tickSize;
+    const minOrderSize = constraints.minOrderSize;
 
     // Validate input shares
     if (!shares || shares < 0.01) {
@@ -315,9 +406,8 @@ export class Trader {
       return null;
     }
 
-    // Polymarket minimum order size is 5 shares
-    if (shares < MIN_ORDER_SIZE) {
-      console.error(`Limit sell size ${shares.toFixed(2)} below minimum ${MIN_ORDER_SIZE} shares - position too small to sell`);
+    if (shares < minOrderSize) {
+      console.error(`Limit sell size ${shares.toFixed(2)} below minimum ${minOrderSize.toFixed(2)} shares - position too small to sell`);
       return null;
     }
 
@@ -326,25 +416,26 @@ export class Trader {
         const sharesToSell = await this.validateAndAdjustShares(tokenId, shares, "");
         if (sharesToSell === null) return null;
 
-        // Validate price is within Polymarket's allowed range (0.01 - 0.99)
-        if (price < 0.01 || price > 0.99) {
-          console.error(`Invalid limit price: $${price.toFixed(4)} (must be 0.01-0.99)`);
+        const safePrice = this.normalizePriceForTick(price, tickSize);
+        if (safePrice <= 0 || safePrice >= 1) {
+          console.error(`Invalid limit price: $${safePrice.toFixed(4)}`);
           return null;
         }
 
-        await clobLimiter.acquire();
+        await clobBackgroundLimiter.acquire();
         const response = await client.createAndPostOrder({
           tokenID: tokenId,
-          price,
+          price: safePrice,
           size: sharesToSell,
-          side: Side.SELL,
-          feeRateBps: ORDER_FEE_RATE_BPS
+          side: Side.SELL
+        }, {
+          tickSize: this.toTickSizeString(tickSize)
         });
 
         if (response.success) {
           return {
             orderId: response.orderID || "",
-            price
+            price: safePrice
           };
         }
 
@@ -376,9 +467,10 @@ export class Trader {
     shares: number,
     bidOverride?: number,
     maxRetries: number = 3
-  ): Promise<{ orderId: string; price: number } | null> {
+  ): Promise<MarketSellResult | null> {
     const client = this.ensureClient();
     this.lastMarketSellError = null;
+    const retryBackoffMs = [250, 500, 1000];
 
     // Validate input shares
     if (!shares || shares < 0.01) {
@@ -388,170 +480,166 @@ export class Trader {
       throw new Error(errMsg);
     }
 
-    // Polymarket minimum order size is 5 shares
-    if (shares < MIN_ORDER_SIZE) {
-      const errMsg = `[STOP-LOSS] Sell size ${shares.toFixed(2)} below minimum ${MIN_ORDER_SIZE} shares - position too small to sell`;
+    const constraints = await this.getMarketConstraints(tokenId);
+    if (!constraints) {
+      const errMsg = "[STOP-LOSS] Failed to load market constraints";
       this.lastMarketSellError = errMsg;
       console.error(errMsg);
       throw new Error(errMsg);
     }
+    const tickSize = constraints.tickSize;
+    const minOrderSize = constraints.minOrderSize;
+    const tickSizeOption = this.toTickSizeString(tickSize);
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    let remainingShares = shares;
+    let totalFilledShares = 0;
+    let totalNotional = 0;
+    const orderIds: string[] = [];
+
+    for (let attempt = 1; attempt <= maxRetries && remainingShares >= 0.01; attempt++) {
       try {
-        const sharesToSell = await this.validateAndAdjustShares(tokenId, shares, "[STOP-LOSS]");
-        if (sharesToSell === null) {
-          throw new Error(`[STOP-LOSS] validateAndAdjustShares returned null - check position balance`);
+        const sharesToSell = await this.validateAndAdjustShares(tokenId, remainingShares, "[STOP-LOSS]", true);
+        if (sharesToSell === null || sharesToSell < 0.01) {
+          break;
         }
 
-        // Use WebSocket bid override if provided and valid; otherwise fall back to REST
-        let validBid: number;
+        if (sharesToSell < minOrderSize) {
+          if (totalFilledShares > 0) {
+            break;
+          }
+          const errMsg = `[STOP-LOSS] Sell size ${sharesToSell.toFixed(2)} below market minimum ${minOrderSize.toFixed(2)} shares`;
+          this.lastMarketSellError = errMsg;
+          console.error(errMsg);
+          throw new Error(errMsg);
+        }
+
+        let referenceBid: number;
         if (Number.isFinite(bidOverride ?? NaN) && (bidOverride as number) > 0) {
-          validBid = bidOverride as number;
-          if (validBid < 0.05) {
-            const errMsg = `[STOP-LOSS] Bid override too low: $${validBid.toFixed(4)} (min: 0.05)`;
-            this.lastMarketSellError = errMsg;
-            console.error(errMsg);
-            throw new Error(errMsg);
-          }
+          referenceBid = bidOverride as number;
         } else {
-          // Get current bid price for market sell (already rate limited)
-          const bidCheck = await this.checkBidValid(tokenId);
-
-          if (!bidCheck.valid) {
-            let errMsg: string;
-            if (bidCheck.reason === "empty_book") {
-              errMsg = `[STOP-LOSS] Order book empty (bid=0) - market may have resolved or no liquidity`;
-            } else {
-              errMsg = `[STOP-LOSS] Bid price too low: $${bidCheck.bid.toFixed(4)} (min: 0.05) - likely bad data or resolved market`;
-            }
+          const { bid } = await this.getPrice(tokenId);
+          referenceBid = bid;
+          if (referenceBid <= 0) {
+            const errMsg = "[STOP-LOSS] Order book empty (bid=0) - no immediate liquidity";
             this.lastMarketSellError = errMsg;
             console.error(errMsg);
-            // Don't retry if market is likely resolved - throw to trigger redemption flow
+            if (totalFilledShares > 0) break;
             throw new Error(errMsg);
           }
-
-          validBid = bidCheck.bid;
         }
-        if (validBid > 0.99) {
-          // Cap at 0.99 (max allowed)
-          console.log(`[STOP-LOSS] Capping bid from $${validBid.toFixed(2)} to $0.99`);
-          validBid = 0.99;
-        }
+        const safePrice = this.normalizePriceForTick(referenceBid, tickSize);
 
-        await clobLimiter.acquire();
-        const response = await client.createAndPostOrder({
+        await clobCriticalLimiter.acquire();
+        const response = await client.createAndPostMarketOrder({
           tokenID: tokenId,
-          price: validBid,
-          size: sharesToSell,
+          amount: sharesToSell,
           side: Side.SELL,
-          feeRateBps: ORDER_FEE_RATE_BPS
-        });
+          price: safePrice
+        }, {
+          tickSize: tickSizeOption
+        }, OrderType.FAK);
 
-        if (response.success) {
-          const orderId = response.orderID || "";
-
-          // Get actual fill price instead of placement price.
-          // If the order is not fully filled quickly, cancel remainder and retry later.
-          const fillInfo = await this.waitForFill(orderId, 3000);
-          const initialFilledShares = fillInfo?.filledShares || 0;
-          const fullyFilled = initialFilledShares >= sharesToSell * 0.99;
-
-          if (!fullyFilled) {
-            // One extra check in case order status API lagged during waitForFill.
-            const finalInfo = await this.getOrderFillInfo(orderId);
-            const finalFilledShares = finalInfo?.filledShares || initialFilledShares;
-            const finalFullyFilled = finalFilledShares >= sharesToSell * 0.99;
-
-            if (finalFullyFilled) {
-              const actualPrice = finalInfo?.avgPrice || fillInfo?.avgPrice || validBid;
-              return {
-                orderId,
-                price: actualPrice
-              };
-            }
-
-            const cancelled = await this.cancelOrder(orderId);
-
-            // If status/fill API lagged, confirm via position balance before declaring failure.
-            const remainingBalance = await this.getPositionBalance(tokenId);
-            if (remainingBalance !== null && remainingBalance < 0.01) {
-              const actualPrice = finalInfo?.avgPrice || fillInfo?.avgPrice || validBid;
-              console.log("[STOP-LOSS] Sell appears fully filled after timeout (position balance is zero)");
-              return {
-                orderId,
-                price: actualPrice
-              };
-            }
-
-            const inferredFilledShares = remainingBalance !== null
-              ? Math.max(0, sharesToSell - remainingBalance)
-              : finalFilledShares;
-            const fillDetail = inferredFilledShares > 0
-              ? `partially filled (${inferredFilledShares.toFixed(2)}/${sharesToSell.toFixed(2)})`
-              : "not filled";
-            const errMsg = cancelled
-              ? `[STOP-LOSS] Sell ${fillDetail} within timeout - cancelled remainder and will retry`
-              : `[STOP-LOSS] Sell ${fillDetail} within timeout - cancel may have failed`;
-            this.lastMarketSellError = errMsg;
-            console.log(errMsg);
-            return null;
+        if (!response.success) {
+          if (this.isBalanceAllowanceError(response.errorMsg || "")) {
+            const backoffMs = retryBackoffMs[Math.min(attempt - 1, retryBackoffMs.length - 1)];
+            console.log(`[STOP-LOSS] Sell failed due to balance/allowance (attempt ${attempt}/${maxRetries}), retrying in ${backoffMs}ms...`);
+            await this.sleep(backoffMs);
+            continue;
           }
-
-          const actualPrice = fillInfo?.avgPrice || validBid;
-
-          return {
-            orderId,
-            price: actualPrice
-          };
+          const errMsg = `[STOP-LOSS] Sell failed: ${response.errorMsg || "unknown error"}`;
+          this.lastMarketSellError = errMsg;
+          console.error(errMsg);
+          if (totalFilledShares > 0) break;
+          throw new Error(errMsg);
         }
 
-        if (this.isBalanceAllowanceError(response.errorMsg || "")) {
-          // Exponential backoff: 1s, 2s, 4s
-          const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 4000);
-          console.log(`[STOP-LOSS] Sell failed due to balance/allowance (attempt ${attempt}/${maxRetries}), retrying in ${backoffMs}ms...`);
-          await new Promise(resolve => setTimeout(resolve, backoffMs));
-          continue;
+        const orderId = response.orderID || "";
+        orderIds.push(orderId);
+        const fillInfo = await this.waitForFill(orderId, 3000, 250);
+        const filledShares = fillInfo?.filledShares || 0;
+        const fillPrice = fillInfo?.avgPrice || safePrice;
+        if (filledShares > 0) {
+          totalFilledShares += filledShares;
+          totalNotional += filledShares * fillPrice;
+          remainingShares = Math.max(0, remainingShares - filledShares);
+        } else {
+          this.lastMarketSellError = "[STOP-LOSS] No shares filled on market sell attempt";
         }
 
-        const errMsg = `[STOP-LOSS] Sell failed: ${response.errorMsg || "unknown error"}`;
-        this.lastMarketSellError = errMsg;
-        console.error(errMsg);
-        throw new Error(errMsg);
+        if (remainingShares < 0.01 || remainingShares < minOrderSize) {
+          break;
+        }
+
+        if (attempt < maxRetries) {
+          const backoffMs = retryBackoffMs[Math.min(attempt - 1, retryBackoffMs.length - 1)];
+          await this.sleep(backoffMs);
+        }
       } catch (err: any) {
         if (this.isBalanceAllowanceError(err?.toString() || "")) {
-          const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 4000);
+          const backoffMs = retryBackoffMs[Math.min(attempt - 1, retryBackoffMs.length - 1)];
           console.log(`[STOP-LOSS] Sell error due to balance/allowance (attempt ${attempt}/${maxRetries}), retrying in ${backoffMs}ms...`);
-          await new Promise(resolve => setTimeout(resolve, backoffMs));
+          await this.sleep(backoffMs);
           continue;
         }
         const errMsg = err instanceof Error ? err.message : String(err);
         this.lastMarketSellError = errMsg;
         console.error("[STOP-LOSS] Sell error:", err);
+        if (totalFilledShares > 0) {
+          break;
+        }
         return null;
       }
     }
 
-    const errMsg = "[STOP-LOSS] Market sell failed after all retries - CRITICAL";
-    this.lastMarketSellError = errMsg;
-    console.error(errMsg);
-    throw new Error(errMsg);
+    if (totalFilledShares <= 0) {
+      const errMsg = "[STOP-LOSS] Market sell failed to fill any shares";
+      this.lastMarketSellError = errMsg;
+      console.error(errMsg);
+      return null;
+    }
+
+    const actualBalance = await this.getPositionBalance(tokenId);
+    if (actualBalance !== null) {
+      remainingShares = Math.max(0, Math.min(actualBalance, remainingShares));
+    }
+
+    return {
+      orderIds,
+      filledShares: totalFilledShares,
+      remainingShares,
+      avgPrice: totalNotional / totalFilledShares
+    };
   }
 
-  async getOpenOrders(): Promise<any[]> {
+  async getOpenOrders(params?: { asset_id?: string; market?: string }): Promise<any[]> {
     const client = this.ensureClient();
     try {
-      await clobLimiter.acquire();
-      const orders = await client.getOpenOrders();
+      await clobBackgroundLimiter.acquire();
+      const orders = await client.getOpenOrders(params);
       return orders || [];
     } catch {
       return [];
     }
   }
 
+  async cancelOpenOrdersForToken(tokenId: string): Promise<number> {
+    const openOrders = await this.getOpenOrders({ asset_id: tokenId });
+    let cancelledCount = 0;
+    for (const order of openOrders) {
+      const orderId = order?.id;
+      if (!orderId) continue;
+      const cancelled = await this.cancelOrder(orderId);
+      if (cancelled) {
+        cancelledCount++;
+      }
+    }
+    return cancelledCount;
+  }
+
   async getOrder(orderId: string): Promise<any | null> {
     const client = this.ensureClient();
     try {
-      await clobLimiter.acquire();
+      await clobCriticalLimiter.acquire();
       const order = await client.getOrder(orderId);
       return order;
     } catch {
@@ -588,6 +676,16 @@ export class Trader {
     return { filled, filledShares, avgPrice, status };
   }
 
+  private isTerminalOrderStatus(status: string): boolean {
+    const normalized = status.toUpperCase();
+    return normalized === "MATCHED" ||
+      normalized === "FILLED" ||
+      normalized === "CANCELLED" ||
+      normalized === "CANCELED" ||
+      normalized === "REJECTED" ||
+      normalized === "FAILED";
+  }
+
   /**
    * Wait for an order to fill with timeout
    * Returns fill info or null if timeout/cancelled
@@ -614,12 +712,12 @@ export class Trader {
       // Reset error counter on successful API call
       consecutiveApiErrors = 0;
 
-      if (fillInfo.filled && fillInfo.filledShares > 0) {
+      if (fillInfo.filledShares > 0 && (fillInfo.filled || this.isTerminalOrderStatus(fillInfo.status))) {
         return { filledShares: fillInfo.filledShares, avgPrice: fillInfo.avgPrice };
       }
 
       // Check if order was explicitly cancelled or rejected
-      if (fillInfo.status === "CANCELLED" || fillInfo.status === "REJECTED") {
+      if (this.isTerminalOrderStatus(fillInfo.status)) {
         return null;
       }
 
@@ -640,7 +738,7 @@ export class Trader {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        await clobLimiter.acquire();
+        await clobCriticalLimiter.acquire();
         await client.cancelOrder({ orderID: orderId });
         return true;
       } catch (err) {
@@ -684,11 +782,6 @@ export class Trader {
     // Empty order book (bid = 0) - could be resolved market or no liquidity
     if (bid === 0) {
       return { valid: false, bid, reason: "empty_book" };
-    }
-
-    // Below minimum tradeable price - likely bad data or resolved market
-    if (bid < 0.05) {
-      return { valid: false, bid, reason: "below_minimum" };
     }
 
     return { valid: true, bid };
