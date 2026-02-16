@@ -1,4 +1,5 @@
 import type { RiskMode, LadderStep } from "../config";
+import type { MarketTimeframe } from "../market-timeframe";
 
 // Configuration for a single backtest run
 export interface BacktestConfig {
@@ -23,6 +24,7 @@ export interface BacktestConfig {
 
   // Risk mode
   riskMode: RiskMode;
+  marketTimeframe: MarketTimeframe;
 }
 
 // Parameter ranges for optimization
@@ -201,5 +203,6 @@ export const DEFAULT_BACKTEST_CONFIG: Omit<BacktestConfig, "startDate" | "endDat
   compoundLimit: 0, // Disabled by default
   baseBalance: 10,
   riskMode: "normal",
+  marketTimeframe: "5m",
   ladderSteps: [],
 };

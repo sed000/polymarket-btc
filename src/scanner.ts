@@ -1,4 +1,5 @@
 import { gammaLimiter } from "./rate-limiter";
+import { buildMarketSlug, getMarketTimeframeProfile, type MarketTimeframe } from "./market-timeframe";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
 
@@ -42,17 +43,18 @@ export interface EligibleMarket {
   eligibleSide: "UP" | "DOWN" | null;
 }
 
-export async function fetchBtc15MinMarkets(): Promise<Market[]> {
+export async function fetchBtcMarkets(timeframe: MarketTimeframe): Promise<Market[]> {
   const markets: Market[] = [];
+  const profile = getMarketTimeframeProfile(timeframe);
 
   const nowSec = Math.floor(Date.now() / 1000);
-  const intervalSec = 15 * 60;
+  const intervalSec = profile.intervalSec;
   const currentIntervalStart = Math.floor(nowSec / intervalSec) * intervalSec;
 
   // Fetch current and next interval
   for (let i = 0; i < 2; i++) {
     const timestamp = currentIntervalStart + (i * intervalSec);
-    const slug = `btc-updown-15m-${timestamp}`;
+    const slug = buildMarketSlug(timeframe, timestamp);
 
     try {
       // Rate limit API calls

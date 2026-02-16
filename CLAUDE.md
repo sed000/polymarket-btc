@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Polymarket Trading Bot - An automated trading bot for Polymarket's BTC 15-minute prediction markets. The bot monitors Bitcoin price prediction markets, executes trades based on configurable thresholds, and supports paper trading, backtesting, and real trading modes.
+Polymarket Trading Bot - An automated trading bot for Polymarket BTC 5-minute and 15-minute prediction markets. The bot monitors Bitcoin price prediction markets, executes trades based on configurable thresholds, and supports paper trading, backtesting, and real trading modes.
 
 ## Commands
 
@@ -19,8 +19,12 @@ bun start            # Run production
 ```bash
 bun run db:paper     # View paper trading results (normal mode)
 bun run db:real      # View real trading results
+bun run db:paper:5m  # View paper trading results from trades_5m
+bun run db:real:5m   # View real trading results from trades_5m
 bun run db:stats:paper  # Paper trading statistics
 bun run db:stats:real   # Real trading statistics
+bun run db:stats:paper:5m  # Paper trading statistics from trades_5m
+bun run db:stats:real:5m   # Real trading statistics from trades_5m
 bun run db:reset:*      # Reset specific database
 ```
 
@@ -51,14 +55,19 @@ bun run backtest:history  # View historical runs
 
 **src/trader.ts** - Polymarket CLOB API wrapper. Handles order execution, wallet interaction, signature types (EOA, Magic.link proxy, Gnosis Safe).
 
-**src/scanner.ts** - Market discovery. Fetches BTC 15-min markets from Gamma API, analyzes for entry signals based on price thresholds and spread filters.
+**src/scanner.ts** - Market discovery. Fetches BTC markets for configured timeframe (5m or 15m) from Gamma API, analyzes for entry signals based on price thresholds and spread filters.
 
 **src/websocket.ts** - WebSocket connection for real-time orderbook prices. Maintains subscription state, handles reconnection.
 
 **src/db.ts** - SQLite database layer using `bun:sqlite`. Two database systems:
 - Trading DB: `trades_real.db`, `trades_paper_normal.db`
 - Backtest DB: `backtest.db` with price history, historical markets, and run results
-- Backtest tables: `backtest_runs`, `backtest_trades`, `historical_markets`, `price_history`
+- Trading tables:
+  - 15m (legacy): `trades`, `activity_logs`, `ladder_market_locks`
+  - 5m: `trades_5m`, `activity_logs_5m`, `ladder_market_locks_5m`
+- Backtest tables:
+  - 15m (legacy): `backtest_runs`, `backtest_trades`, `historical_markets`, `price_history`
+  - 5m: `backtest_runs_5m`, `backtest_trades_5m`, `historical_markets_5m`, `price_history_5m`
 
 **src/ui.tsx** - Terminal UI using Ink (React for CLI). Displays market overview, positions, logs, and stats.
 
@@ -84,6 +93,9 @@ Configuration is stored in `trading.config.json` with hot-reload support. Edit t
     "maxPositions": 1,          // Max concurrent positions
     "pollIntervalMs": 10000     // Market scan interval
   },
+  "market": {
+    "timeframe": "5m"           // Live market timeframe: "5m" or "15m"
+  },
   "wallet": {
     "signatureType": 0,         // 0=EOA, 1=Magic.link proxy, 2=Gnosis Safe
     "funderAddress": null       // Required for signature type 1
@@ -98,6 +110,7 @@ Configuration is stored in `trading.config.json` with hot-reload support. Edit t
   },
   "backtest": {
     "mode": "normal",           // Mode to use for backtesting
+    "marketTimeframe": "5m",    // Default backtest market timeframe: "5m" or "15m"
     "startingBalance": 100,
     "days": 7,
     "slippage": 0.001
@@ -134,10 +147,11 @@ Only secrets remain in `.env`:
 **Require restart:**
 - `paperTrading` (changes database)
 - `signatureType`, `funderAddress` (wallet config)
+- `market.timeframe` (changes market subscriptions and DB table set)
 
 ## Important Patterns
 
 - **Position mutex**: `pendingEntries` and `pendingExits` Sets prevent race conditions in concurrent WebSocket callbacks
 - **Opposite-side rule**: After a winning trade, only enter the opposite side in the same market (prevents chasing)
-- **Market slug format**: `btc-updown-15m-{unix_timestamp}` where timestamp is interval start
+- **Market slug format**: `btc-updown-{5m|15m}-{unix_timestamp}` where timestamp is interval start
 - **Price data flow**: WebSocket preferred → REST API fallback → Gamma API for market discovery

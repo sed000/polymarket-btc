@@ -97,7 +97,7 @@ function getTestOpenTrades(db: Database): Trade[] {
 }
 
 function getTestLastClosedTrade(db: Database): Trade | null {
-  const stmt = db.prepare("SELECT * FROM trades WHERE status != 'OPEN' ORDER BY closed_at DESC LIMIT 1");
+  const stmt = db.prepare("SELECT * FROM trades WHERE status != 'OPEN' ORDER BY closed_at DESC, id DESC LIMIT 1");
   return stmt.get() as Trade | null;
 }
 

@@ -6,7 +6,10 @@ import {
   loadPriceTicks,
   getPriceTickCount,
   initBacktestDatabase,
+  getHistoricalMarketCount,
+  loadHistoricalMarketsInRange,
 } from "../db";
+import { buildMarketSlug, getMarketTimeframeProfile, type MarketTimeframe } from "../market-timeframe";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
 const CLOB_API = "https://clob.polymarket.com";
@@ -30,20 +33,25 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Generate all market slugs for BTC 15-min markets in a date range
+ * Generate all market slugs for BTC up/down markets in a date range
  */
-export function generateMarketSlugs(startDate: Date, endDate: Date): string[] {
+export function generateMarketSlugs(
+  startDate: Date,
+  endDate: Date,
+  marketTimeframe: MarketTimeframe
+): string[] {
   const slugs: string[] = [];
-  const intervalSec = 15 * 60; // 15 minutes
+  const profile = getMarketTimeframeProfile(marketTimeframe);
+  const intervalSec = profile.intervalSec;
 
-  // Round start to nearest 15-min interval
+  // Round start to nearest interval for selected timeframe
   const startTs = Math.floor(startDate.getTime() / 1000);
   const endTs = Math.floor(endDate.getTime() / 1000);
 
   const firstInterval = Math.ceil(startTs / intervalSec) * intervalSec;
 
   for (let ts = firstInterval; ts <= endTs; ts += intervalSec) {
-    slugs.push(`btc-updown-15m-${ts}`);
+    slugs.push(buildMarketSlug(marketTimeframe, ts));
   }
 
   return slugs;
@@ -204,8 +212,11 @@ export type ProgressCallback = (progress: FetchProgress) => void;
  */
 export async function fetchMarketData(
   slug: string,
+  marketTimeframe: MarketTimeframe,
   forceRefetch: boolean = false
 ): Promise<HistoricalMarket | null> {
+  initBacktestDatabase(marketTimeframe);
+
   // Check cache first
   const cached = getHistoricalMarket(slug);
   if (cached && !forceRefetch) {
@@ -248,8 +259,9 @@ export async function fetchMarketData(
     return null;
   }
 
-  // Calculate market start time (15 min before end)
-  const startDate = new Date(marketMeta.endDate.getTime() - 15 * 60 * 1000);
+  // Calculate market start time based on market timeframe duration
+  const profile = getMarketTimeframeProfile(marketTimeframe);
+  const startDate = new Date(marketMeta.endDate.getTime() - profile.intervalMs);
   const startTs = Math.floor(startDate.getTime() / 1000);
   const endTs = Math.floor(marketMeta.endDate.getTime() / 1000);
 
@@ -316,11 +328,13 @@ export async function fetchHistoricalDataset(
   options: {
     forceRefetch?: boolean;
     onProgress?: ProgressCallback;
+    marketTimeframe?: MarketTimeframe;
   } = {}
 ): Promise<HistoricalMarket[]> {
-  initBacktestDatabase();
+  const marketTimeframe = options.marketTimeframe || "5m";
+  initBacktestDatabase(marketTimeframe);
 
-  const slugs = generateMarketSlugs(startDate, endDate);
+  const slugs = generateMarketSlugs(startDate, endDate, marketTimeframe);
   const markets: HistoricalMarket[] = [];
   let fetchedCount = 0;
   let cachedCount = 0;
@@ -343,7 +357,7 @@ export async function fetchHistoricalDataset(
       });
 
       // Load from cache
-      const market = await fetchMarketData(slug, false);
+      const market = await fetchMarketData(slug, marketTimeframe, false);
       if (market) {
         markets.push(market);
       }
@@ -357,7 +371,7 @@ export async function fetchHistoricalDataset(
       status: "fetching",
     });
 
-    const market = await fetchMarketData(slug, options.forceRefetch);
+    const market = await fetchMarketData(slug, marketTimeframe, options.forceRefetch);
 
     if (market) {
       markets.push(market);
@@ -382,15 +396,16 @@ export async function fetchHistoricalDataset(
  */
 export async function loadCachedDataset(
   startDate: Date,
-  endDate: Date
+  endDate: Date,
+  marketTimeframe: MarketTimeframe
 ): Promise<HistoricalMarket[]> {
-  initBacktestDatabase();
+  initBacktestDatabase(marketTimeframe);
 
-  const slugs = generateMarketSlugs(startDate, endDate);
+  const slugs = generateMarketSlugs(startDate, endDate, marketTimeframe);
   const markets: HistoricalMarket[] = [];
 
   for (const slug of slugs) {
-    const market = await fetchMarketData(slug, false);
+    const market = await fetchMarketData(slug, marketTimeframe, false);
     if (market && market.priceTicks.length > 0) {
       markets.push(market);
     }
@@ -402,14 +417,13 @@ export async function loadCachedDataset(
 /**
  * Get summary of cached data
  */
-export function getCacheStats(): {
+export function getCacheStats(marketTimeframe: MarketTimeframe): {
   totalMarkets: number;
   totalPriceTicks: number;
   dateRange: { earliest: Date | null; latest: Date | null };
 } {
-  initBacktestDatabase();
+  initBacktestDatabase(marketTimeframe);
 
-  const { loadHistoricalMarketsInRange, getHistoricalMarketCount } = require("../db");
   const marketCount = getHistoricalMarketCount();
 
   // Get date range from all markets

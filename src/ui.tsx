@@ -4,6 +4,7 @@ import { Bot, type BotState, type WsStats, type LadderState } from "./bot";
 import { getRecentTrades, getTotalPnL, getTradeStats, type Trade } from "./db";
 import { formatTimeRemaining, type EligibleMarket } from "./scanner";
 import { type ConfigManager } from "./config";
+import { getMarketTimeframeProfile } from "./market-timeframe";
 
 interface AppProps {
   bot: Bot;
@@ -13,6 +14,7 @@ function Header({ state, configManager }: { state: BotState; configManager: Conf
   const mode = configManager.getActiveMode();
   const isLadder = configManager.isLadderMode();
   const borderColor = state.paperTrading ? "yellow" : "cyan";
+  const marketLabel = getMarketTimeframeProfile(configManager.getMarketTimeframe()).displayLabel;
 
   // Get active config values from ConfigManager
   const activeEntry = mode.entryThreshold;
@@ -26,7 +28,7 @@ function Header({ state, configManager }: { state: BotState; configManager: Conf
     <Box flexDirection="column" borderStyle="single" borderColor={borderColor} paddingX={1}>
       <Box justifyContent="space-between">
         <Text bold color={borderColor}>
-          POLYMARKET BTC 15-MIN BOT {state.paperTrading && "[PAPER]"} {isLadder && <Text color="magenta">[LADDER]</Text>}
+          POLYMARKET BTC {marketLabel} BOT {state.paperTrading && "[PAPER]"} {isLadder && <Text color="magenta">[LADDER]</Text>}
         </Text>
         <Box gap={2}>
           <Text color={state.wsConnected ? "green" : "yellow"}>
@@ -74,10 +76,10 @@ function Header({ state, configManager }: { state: BotState; configManager: Conf
   );
 }
 
-function MarketsTable({ markets }: { markets: EligibleMarket[] }) {
+function MarketsTable({ markets, marketLabel }: { markets: EligibleMarket[]; marketLabel: string }) {
   return (
     <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} marginTop={1}>
-      <Text bold color="white">Active BTC 15-Min Markets (Bid/Ask)</Text>
+      <Text bold color="white">Active BTC {marketLabel} Markets (Bid/Ask)</Text>
       <Box marginTop={1} flexDirection="column">
         <Box>
           <Box width={12}><Text color="gray">Time</Text></Box>
@@ -385,6 +387,7 @@ function App({ bot }: AppProps) {
   const [logScrollOffset, setLogScrollOffset] = useState(0);
   const [autoScroll, setAutoScroll] = useState(true);
   const logDisplayCount = 5;
+  const marketLabel = getMarketTimeframeProfile(configManager.getMarketTimeframe()).displayLabel;
 
   const refresh = async () => {
     setState({ ...bot.getState() });
@@ -451,7 +454,7 @@ function App({ bot }: AppProps) {
       <Header state={state} configManager={configManager} />
       <Box>
         <Box flexDirection="column" width="50%">
-          <MarketsTable markets={markets} />
+          <MarketsTable markets={markets} marketLabel={marketLabel} />
           <PositionsTable state={state} configManager={configManager} />
           <Logs logs={state.logs} scrollOffset={logScrollOffset} autoScroll={autoScroll} />
         </Box>

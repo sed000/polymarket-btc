@@ -44,6 +44,7 @@ function makeConfig(): BacktestConfig {
     compoundLimit: 0,
     baseBalance: 10,
     riskMode: "ladder",
+    marketTimeframe: "15m",
     ladderSteps: [
       {
         id: "step1",

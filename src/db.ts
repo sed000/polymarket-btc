@@ -1,18 +1,54 @@
 import { Database } from "bun:sqlite";
+import type { MarketTimeframe } from "./market-timeframe";
 
 let db: Database | null = null;
 let currentDbPath: string | null = null;
+let currentMarketTimeframe: MarketTimeframe | null = null;
+
+type RuntimeTableNames = {
+  trades: string;
+  ladderLocks: string;
+  activityLogs: string;
+  logIdxTimestamp: string;
+  logIdxMarket: string;
+  logIdxLevel: string;
+};
+
+function getRuntimeTableNames(marketTimeframe: MarketTimeframe): RuntimeTableNames {
+  if (marketTimeframe === "5m") {
+    return {
+      trades: "trades_5m",
+      ladderLocks: "ladder_market_locks_5m",
+      activityLogs: "activity_logs_5m",
+      logIdxTimestamp: "idx_logs_timestamp_5m",
+      logIdxMarket: "idx_logs_market_5m",
+      logIdxLevel: "idx_logs_level_5m",
+    };
+  }
+
+  return {
+    trades: "trades",
+    ladderLocks: "ladder_market_locks",
+    activityLogs: "activity_logs",
+    logIdxTimestamp: "idx_logs_timestamp",
+    logIdxMarket: "idx_logs_market",
+    logIdxLevel: "idx_logs_level",
+  };
+}
+
+let runtimeTables: RuntimeTableNames = getRuntimeTableNames("15m");
 
 /**
  * Initialize the database for trading mode
  * - Real trading: trades_real.db
  * - Paper trading: trades_paper_normal.db
  */
-export function initDatabase(paperTrading: boolean): void {
+export function initDatabase(paperTrading: boolean, marketTimeframe: MarketTimeframe): void {
   const dbPath = paperTrading ? "trades_paper_normal.db" : "trades_real.db";
+  runtimeTables = getRuntimeTableNames(marketTimeframe);
 
   // Skip if already using this database
-  if (currentDbPath === dbPath && db) {
+  if (currentDbPath === dbPath && currentMarketTimeframe === marketTimeframe && db) {
     return;
   }
 
@@ -22,10 +58,11 @@ export function initDatabase(paperTrading: boolean): void {
   }
 
   currentDbPath = dbPath;
+  currentMarketTimeframe = marketTimeframe;
   db = new Database(dbPath);
 
   db.run(`
-    CREATE TABLE IF NOT EXISTS trades (
+    CREATE TABLE IF NOT EXISTS ${runtimeTables.trades} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       market_slug TEXT NOT NULL,
       token_id TEXT NOT NULL,
@@ -44,7 +81,7 @@ export function initDatabase(paperTrading: boolean): void {
 
   // Add market_end_date column if it doesn't exist (for existing DBs)
   try {
-    db.run("ALTER TABLE trades ADD COLUMN market_end_date TEXT");
+    db.run(`ALTER TABLE ${runtimeTables.trades} ADD COLUMN market_end_date TEXT`);
   } catch (err) {
     // Column already exists - this is expected for existing databases
     // Only log if it's an unexpected error
@@ -56,7 +93,7 @@ export function initDatabase(paperTrading: boolean): void {
 
   // Add ladder mode columns (for existing DBs)
   try {
-    db.run("ALTER TABLE trades ADD COLUMN is_ladder_trade INTEGER DEFAULT 0");
+    db.run(`ALTER TABLE ${runtimeTables.trades} ADD COLUMN is_ladder_trade INTEGER DEFAULT 0`);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     if (!errMsg.includes("duplicate column")) {
@@ -64,7 +101,7 @@ export function initDatabase(paperTrading: boolean): void {
     }
   }
   try {
-    db.run("ALTER TABLE trades ADD COLUMN ladder_step_id TEXT");
+    db.run(`ALTER TABLE ${runtimeTables.trades} ADD COLUMN ladder_step_id TEXT`);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     if (!errMsg.includes("duplicate column")) {
@@ -72,7 +109,7 @@ export function initDatabase(paperTrading: boolean): void {
     }
   }
   try {
-    db.run("ALTER TABLE trades ADD COLUMN ladder_state_json TEXT");
+    db.run(`ALTER TABLE ${runtimeTables.trades} ADD COLUMN ladder_state_json TEXT`);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     if (!errMsg.includes("duplicate column")) {
@@ -82,7 +119,7 @@ export function initDatabase(paperTrading: boolean): void {
 
   // Ladder market locks (prevent re-entry after ladder completion)
   db.run(`
-    CREATE TABLE IF NOT EXISTS ladder_market_locks (
+    CREATE TABLE IF NOT EXISTS ${runtimeTables.ladderLocks} (
       market_slug TEXT PRIMARY KEY,
       locked_at TEXT NOT NULL
     )
@@ -90,7 +127,7 @@ export function initDatabase(paperTrading: boolean): void {
 
   // Activity logs table for persistent logging
   db.run(`
-    CREATE TABLE IF NOT EXISTS activity_logs (
+    CREATE TABLE IF NOT EXISTS ${runtimeTables.activityLogs} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       timestamp TEXT NOT NULL,
       timestamp_unix INTEGER NOT NULL,
@@ -104,11 +141,11 @@ export function initDatabase(paperTrading: boolean): void {
   `);
 
   // Create indexes for efficient querying
-  db.run(`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON activity_logs(timestamp_unix DESC)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_logs_market ON activity_logs(market_slug)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_logs_level ON activity_logs(level)`);
+  db.run(`CREATE INDEX IF NOT EXISTS ${runtimeTables.logIdxTimestamp} ON ${runtimeTables.activityLogs}(timestamp_unix DESC)`);
+  db.run(`CREATE INDEX IF NOT EXISTS ${runtimeTables.logIdxMarket} ON ${runtimeTables.activityLogs}(market_slug)`);
+  db.run(`CREATE INDEX IF NOT EXISTS ${runtimeTables.logIdxLevel} ON ${runtimeTables.activityLogs}(level)`);
 
-  console.log(`Database initialized: ${dbPath}`);
+  console.log(`Database initialized: ${dbPath} (${marketTimeframe})`);
 }
 
 export function getDbPath(): string {
@@ -146,7 +183,7 @@ export function insertTrade(trade: Omit<Trade, "id" | "exit_price" | "pnl" | "cl
   try {
     const database = ensureDb();
     const stmt = database.prepare(`
-      INSERT INTO trades (market_slug, token_id, side, entry_price, shares, cost_basis, status, created_at, market_end_date)
+      INSERT INTO ${runtimeTables.trades} (market_slug, token_id, side, entry_price, shares, cost_basis, status, created_at, market_end_date)
       VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
     `);
     const result = stmt.run(
@@ -177,7 +214,7 @@ export function closeTrade(id: number, exitPrice: number, status: "STOPPED" | "R
     const database = ensureDb();
     const pnl = (exitPrice - trade.entry_price) * trade.shares;
     const stmt = database.prepare(`
-      UPDATE trades SET exit_price = ?, status = ?, pnl = ?, closed_at = ?
+      UPDATE ${runtimeTables.trades} SET exit_price = ?, status = ?, pnl = ?, closed_at = ?
       WHERE id = ?
     `);
     stmt.run(exitPrice, status, pnl, new Date().toISOString(), id);
@@ -203,7 +240,7 @@ export function updateTradeShares(tradeId: number, shares: number, costBasis: nu
     }
     const database = ensureDb();
     const stmt = database.prepare(`
-      UPDATE trades SET shares = ?, cost_basis = ? WHERE id = ?
+      UPDATE ${runtimeTables.trades} SET shares = ?, cost_basis = ? WHERE id = ?
     `);
     stmt.run(shares, costBasis, tradeId);
   } catch (err) {
@@ -213,7 +250,7 @@ export function updateTradeShares(tradeId: number, shares: number, costBasis: nu
 
 export function getTradeById(id: number): Trade | null {
   const database = ensureDb();
-  const stmt = database.prepare("SELECT * FROM trades WHERE id = ?");
+  const stmt = database.prepare(`SELECT * FROM ${runtimeTables.trades} WHERE id = ?`);
   return stmt.get(id) as Trade | null;
 }
 
@@ -225,7 +262,7 @@ export function updateLadderState(tradeId: number, stateJson: string): void {
   try {
     const database = ensureDb();
     const stmt = database.prepare(`
-      UPDATE trades SET ladder_state_json = ? WHERE id = ?
+      UPDATE ${runtimeTables.trades} SET ladder_state_json = ? WHERE id = ?
     `);
     stmt.run(stateJson, tradeId);
   } catch (err) {
@@ -240,7 +277,7 @@ export function markAsLadderTrade(tradeId: number, stepId: string): void {
   try {
     const database = ensureDb();
     const stmt = database.prepare(`
-      UPDATE trades SET is_ladder_trade = 1, ladder_step_id = ? WHERE id = ?
+      UPDATE ${runtimeTables.trades} SET is_ladder_trade = 1, ladder_step_id = ? WHERE id = ?
     `);
     stmt.run(stepId, tradeId);
   } catch (err) {
@@ -250,19 +287,19 @@ export function markAsLadderTrade(tradeId: number, stepId: string): void {
 
 export function getOpenTrades(): Trade[] {
   const database = ensureDb();
-  const stmt = database.prepare("SELECT * FROM trades WHERE status = 'OPEN' ORDER BY created_at DESC");
+  const stmt = database.prepare(`SELECT * FROM ${runtimeTables.trades} WHERE status = 'OPEN' ORDER BY created_at DESC`);
   return stmt.all() as Trade[];
 }
 
 export function getRecentTrades(limit = 10): Trade[] {
   const database = ensureDb();
-  const stmt = database.prepare("SELECT * FROM trades ORDER BY created_at DESC LIMIT ?");
+  const stmt = database.prepare(`SELECT * FROM ${runtimeTables.trades} ORDER BY created_at DESC LIMIT ?`);
   return stmt.all(limit) as Trade[];
 }
 
 export function getTotalPnL(): number {
   const database = ensureDb();
-  const stmt = database.prepare("SELECT COALESCE(SUM(pnl), 0) as total FROM trades WHERE pnl IS NOT NULL");
+  const stmt = database.prepare(`SELECT COALESCE(SUM(pnl), 0) as total FROM ${runtimeTables.trades} WHERE pnl IS NOT NULL`);
   const result = stmt.get() as { total: number };
   return result.total;
 }
@@ -275,7 +312,7 @@ export function getTradeStats() {
       SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
       SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
       SUM(CASE WHEN status = 'OPEN' THEN 1 ELSE 0 END) as open
-    FROM trades
+    FROM ${runtimeTables.trades}
   `).get() as { total: number; wins: number; losses: number; open: number };
 
   const closedTrades = stats.wins + stats.losses;
@@ -290,7 +327,7 @@ export function getTradeStats() {
 
 export function getLastClosedTrade(): Trade | null {
   const database = ensureDb();
-  const stmt = database.prepare("SELECT * FROM trades WHERE status != 'OPEN' ORDER BY closed_at DESC, id DESC LIMIT 1");
+  const stmt = database.prepare(`SELECT * FROM ${runtimeTables.trades} WHERE status != 'OPEN' ORDER BY closed_at DESC, id DESC LIMIT 1`);
   return stmt.get() as Trade | null;
 }
 
@@ -301,7 +338,7 @@ export function getLastClosedTrade(): Trade | null {
 export function getLastWinningTradeInMarket(marketSlug: string, side: "UP" | "DOWN"): Trade | null {
   const database = ensureDb();
   const stmt = database.prepare(`
-    SELECT * FROM trades
+    SELECT * FROM ${runtimeTables.trades}
     WHERE market_slug = ? AND side = ? AND status != 'OPEN' AND pnl > 0
     ORDER BY closed_at DESC, id DESC LIMIT 1
   `);
@@ -315,7 +352,7 @@ export function getLastWinningTradeInMarket(marketSlug: string, side: "UP" | "DO
 export function getLadderMarketLocks(): string[] {
   const database = ensureDb();
   const rows = database.prepare(`
-    SELECT market_slug FROM ladder_market_locks
+    SELECT market_slug FROM ${runtimeTables.ladderLocks}
   `).all() as Array<{ market_slug: string }>;
   return rows.map(row => row.market_slug);
 }
@@ -323,7 +360,7 @@ export function getLadderMarketLocks(): string[] {
 export function setLadderMarketLock(marketSlug: string): void {
   const database = ensureDb();
   const stmt = database.prepare(`
-    INSERT OR REPLACE INTO ladder_market_locks (market_slug, locked_at)
+    INSERT OR REPLACE INTO ${runtimeTables.ladderLocks} (market_slug, locked_at)
     VALUES (?, ?)
   `);
   stmt.run(marketSlug, new Date().toISOString());
@@ -332,7 +369,7 @@ export function setLadderMarketLock(marketSlug: string): void {
 export function clearLadderMarketLock(marketSlug: string): void {
   const database = ensureDb();
   const stmt = database.prepare(`
-    DELETE FROM ladder_market_locks WHERE market_slug = ?
+    DELETE FROM ${runtimeTables.ladderLocks} WHERE market_slug = ?
   `);
   stmt.run(marketSlug);
 }
@@ -372,7 +409,7 @@ export function insertLog(entry: LogEntry): number {
     const database = ensureDb();
     const now = new Date();
     const stmt = database.prepare(`
-      INSERT INTO activity_logs (timestamp, timestamp_unix, message, level, market_slug, token_id, trade_id, metadata)
+      INSERT INTO ${runtimeTables.activityLogs} (timestamp, timestamp_unix, message, level, market_slug, token_id, trade_id, metadata)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
@@ -399,7 +436,7 @@ export function insertLog(entry: LogEntry): number {
 export function getRecentLogs(limit = 100): ActivityLog[] {
   const database = ensureDb();
   const stmt = database.prepare(`
-    SELECT * FROM activity_logs
+    SELECT * FROM ${runtimeTables.activityLogs}
     ORDER BY timestamp_unix DESC
     LIMIT ?
   `);
@@ -412,7 +449,7 @@ export function getRecentLogs(limit = 100): ActivityLog[] {
 export function getLogsByMarket(marketSlug: string, limit = 50): ActivityLog[] {
   const database = ensureDb();
   const stmt = database.prepare(`
-    SELECT * FROM activity_logs
+    SELECT * FROM ${runtimeTables.activityLogs}
     WHERE market_slug = ?
     ORDER BY timestamp_unix DESC
     LIMIT ?
@@ -426,7 +463,7 @@ export function getLogsByMarket(marketSlug: string, limit = 50): ActivityLog[] {
 export function getLogsByLevel(level: LogLevel, limit = 100): ActivityLog[] {
   const database = ensureDb();
   const stmt = database.prepare(`
-    SELECT * FROM activity_logs
+    SELECT * FROM ${runtimeTables.activityLogs}
     WHERE level = ?
     ORDER BY timestamp_unix DESC
     LIMIT ?
@@ -440,7 +477,7 @@ export function getLogsByLevel(level: LogLevel, limit = 100): ActivityLog[] {
 export function getLogsByTimeRange(startTime: Date, endTime: Date, limit = 500): ActivityLog[] {
   const database = ensureDb();
   const stmt = database.prepare(`
-    SELECT * FROM activity_logs
+    SELECT * FROM ${runtimeTables.activityLogs}
     WHERE timestamp_unix >= ? AND timestamp_unix <= ?
     ORDER BY timestamp_unix ASC
     LIMIT ?
@@ -455,7 +492,7 @@ export function getLogStats(): { level: string; count: number }[] {
   const database = ensureDb();
   const stmt = database.prepare(`
     SELECT level, COUNT(*) as count
-    FROM activity_logs
+    FROM ${runtimeTables.activityLogs}
     GROUP BY level
     ORDER BY count DESC
   `);
@@ -469,7 +506,7 @@ export function clearOldLogs(daysToKeep = 30): number {
   const database = ensureDb();
   const cutoff = Date.now() - (daysToKeep * 24 * 60 * 60 * 1000);
   const stmt = database.prepare(`
-    DELETE FROM activity_logs
+    DELETE FROM ${runtimeTables.activityLogs}
     WHERE timestamp_unix < ?
   `);
   const result = stmt.run(cutoff);
@@ -481,7 +518,7 @@ export function clearOldLogs(daysToKeep = 30): number {
  */
 export function clearAllLogs(): void {
   const database = ensureDb();
-  database.run("DELETE FROM activity_logs");
+  database.run(`DELETE FROM ${runtimeTables.activityLogs}`);
   console.log("Activity logs cleared");
 }
 
@@ -491,18 +528,62 @@ export function clearAllLogs(): void {
 
 let backtestDb: Database | null = null;
 const BACKTEST_DB_PATH = "backtest.db";
+let currentBacktestTimeframe: MarketTimeframe | null = null;
+
+type BacktestTableNames = {
+  priceHistory: string;
+  historicalMarkets: string;
+  backtestRuns: string;
+  backtestTrades: string;
+  priceHistoryTokenIdx: string;
+  priceHistorySlugIdx: string;
+  backtestTradesRunIdx: string;
+};
+
+function getBacktestTableNames(marketTimeframe: MarketTimeframe): BacktestTableNames {
+  if (marketTimeframe === "5m") {
+    return {
+      priceHistory: "price_history_5m",
+      historicalMarkets: "historical_markets_5m",
+      backtestRuns: "backtest_runs_5m",
+      backtestTrades: "backtest_trades_5m",
+      priceHistoryTokenIdx: "idx_price_history_token_ts_5m",
+      priceHistorySlugIdx: "idx_price_history_slug_5m",
+      backtestTradesRunIdx: "idx_backtest_trades_run_5m",
+    };
+  }
+
+  return {
+    priceHistory: "price_history",
+    historicalMarkets: "historical_markets",
+    backtestRuns: "backtest_runs",
+    backtestTrades: "backtest_trades",
+    priceHistoryTokenIdx: "idx_price_history_token_ts",
+    priceHistorySlugIdx: "idx_price_history_slug",
+    backtestTradesRunIdx: "idx_backtest_trades_run",
+  };
+}
+
+let backtestTables: BacktestTableNames = getBacktestTableNames("15m");
 
 /**
  * Initialize the backtest database with all required tables
  */
-export function initBacktestDatabase(): void {
-  if (backtestDb) return;
+export function initBacktestDatabase(marketTimeframe: MarketTimeframe = "5m"): void {
+  backtestTables = getBacktestTableNames(marketTimeframe);
 
+  if (backtestDb && currentBacktestTimeframe === marketTimeframe) return;
+
+  if (backtestDb) {
+    backtestDb.close();
+  }
+
+  currentBacktestTimeframe = marketTimeframe;
   backtestDb = new Database(BACKTEST_DB_PATH);
 
   // Historical price data for replay
   backtestDb.run(`
-    CREATE TABLE IF NOT EXISTS price_history (
+    CREATE TABLE IF NOT EXISTS ${backtestTables.priceHistory} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       token_id TEXT NOT NULL,
       market_slug TEXT NOT NULL,
@@ -515,12 +596,12 @@ export function initBacktestDatabase(): void {
   `);
 
   // Create indexes for fast queries
-  backtestDb.run(`CREATE INDEX IF NOT EXISTS idx_price_history_token_ts ON price_history(token_id, timestamp)`);
-  backtestDb.run(`CREATE INDEX IF NOT EXISTS idx_price_history_slug ON price_history(market_slug)`);
+  backtestDb.run(`CREATE INDEX IF NOT EXISTS ${backtestTables.priceHistoryTokenIdx} ON ${backtestTables.priceHistory}(token_id, timestamp)`);
+  backtestDb.run(`CREATE INDEX IF NOT EXISTS ${backtestTables.priceHistorySlugIdx} ON ${backtestTables.priceHistory}(market_slug)`);
 
   // Historical market metadata
   backtestDb.run(`
-    CREATE TABLE IF NOT EXISTS historical_markets (
+    CREATE TABLE IF NOT EXISTS ${backtestTables.historicalMarkets} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       market_slug TEXT NOT NULL UNIQUE,
       question TEXT,
@@ -535,7 +616,7 @@ export function initBacktestDatabase(): void {
 
   // Backtest runs
   backtestDb.run(`
-    CREATE TABLE IF NOT EXISTS backtest_runs (
+    CREATE TABLE IF NOT EXISTS ${backtestTables.backtestRuns} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT,
       config_json TEXT NOT NULL,
@@ -548,7 +629,7 @@ export function initBacktestDatabase(): void {
 
   // Backtest trades
   backtestDb.run(`
-    CREATE TABLE IF NOT EXISTS backtest_trades (
+    CREATE TABLE IF NOT EXISTS ${backtestTables.backtestTrades} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id INTEGER NOT NULL,
       market_slug TEXT NOT NULL,
@@ -563,15 +644,15 @@ export function initBacktestDatabase(): void {
       pnl REAL,
       is_ladder_trade INTEGER DEFAULT 0,
       ladder_step_id TEXT,
-      FOREIGN KEY (run_id) REFERENCES backtest_runs(id)
+      FOREIGN KEY (run_id) REFERENCES ${backtestTables.backtestRuns}(id)
     )
   `);
 
-  backtestDb.run(`CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(run_id)`);
+  backtestDb.run(`CREATE INDEX IF NOT EXISTS ${backtestTables.backtestTradesRunIdx} ON ${backtestTables.backtestTrades}(run_id)`);
 
   // Add ladder columns for existing DBs
   try {
-    backtestDb.run("ALTER TABLE backtest_trades ADD COLUMN is_ladder_trade INTEGER DEFAULT 0");
+    backtestDb.run(`ALTER TABLE ${backtestTables.backtestTrades} ADD COLUMN is_ladder_trade INTEGER DEFAULT 0`);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     if (!errMsg.includes("duplicate column")) {
@@ -579,7 +660,7 @@ export function initBacktestDatabase(): void {
     }
   }
   try {
-    backtestDb.run("ALTER TABLE backtest_trades ADD COLUMN ladder_step_id TEXT");
+    backtestDb.run(`ALTER TABLE ${backtestTables.backtestTrades} ADD COLUMN ladder_step_id TEXT`);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     if (!errMsg.includes("duplicate column")) {
@@ -587,12 +668,12 @@ export function initBacktestDatabase(): void {
     }
   }
 
-  console.log(`Backtest database initialized: ${BACKTEST_DB_PATH}`);
+  console.log(`Backtest database initialized: ${BACKTEST_DB_PATH} (${marketTimeframe})`);
 }
 
 function ensureBacktestDb(): Database {
   if (!backtestDb) {
-    initBacktestDatabase();
+    initBacktestDatabase(currentBacktestTimeframe || "5m");
   }
   return backtestDb!;
 }
@@ -618,7 +699,7 @@ export function storePriceTicks(
 ): void {
   const database = ensureBacktestDb();
   const stmt = database.prepare(`
-    INSERT OR REPLACE INTO price_history (token_id, market_slug, timestamp, best_bid, best_ask, mid_price)
+    INSERT OR REPLACE INTO ${backtestTables.priceHistory} (token_id, market_slug, timestamp, best_bid, best_ask, mid_price)
     VALUES (?, ?, ?, ?, ?, ?)
   `);
 
@@ -638,7 +719,7 @@ export function loadPriceTicks(
 ): PriceHistoryRow[] {
   const database = ensureBacktestDb();
 
-  let query = "SELECT * FROM price_history WHERE token_id = ?";
+  let query = `SELECT * FROM ${backtestTables.priceHistory} WHERE token_id = ?`;
   const params: (string | number)[] = [tokenId];
 
   if (startTs !== undefined) {
@@ -658,7 +739,7 @@ export function loadPriceTicks(
 
 export function getPriceTickCount(marketSlug: string): number {
   const database = ensureBacktestDb();
-  const stmt = database.prepare("SELECT COUNT(*) as count FROM price_history WHERE market_slug = ?");
+  const stmt = database.prepare(`SELECT COUNT(*) as count FROM ${backtestTables.priceHistory} WHERE market_slug = ?`);
   const result = stmt.get(marketSlug) as { count: number };
   return result.count;
 }
@@ -690,7 +771,7 @@ export function storeHistoricalMarket(market: {
 }): void {
   const database = ensureBacktestDb();
   const stmt = database.prepare(`
-    INSERT OR REPLACE INTO historical_markets
+    INSERT OR REPLACE INTO ${backtestTables.historicalMarkets}
     (market_slug, question, start_date, end_date, up_token_id, down_token_id, outcome, fetched_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
@@ -708,14 +789,14 @@ export function storeHistoricalMarket(market: {
 
 export function getHistoricalMarket(slug: string): HistoricalMarketRow | null {
   const database = ensureBacktestDb();
-  const stmt = database.prepare("SELECT * FROM historical_markets WHERE market_slug = ?");
+  const stmt = database.prepare(`SELECT * FROM ${backtestTables.historicalMarkets} WHERE market_slug = ?`);
   return stmt.get(slug) as HistoricalMarketRow | null;
 }
 
 export function loadHistoricalMarketsInRange(startDate: Date, endDate: Date): HistoricalMarketRow[] {
   const database = ensureBacktestDb();
   const stmt = database.prepare(`
-    SELECT * FROM historical_markets
+    SELECT * FROM ${backtestTables.historicalMarkets}
     WHERE end_date >= ? AND start_date <= ?
     ORDER BY start_date ASC
   `);
@@ -724,7 +805,7 @@ export function loadHistoricalMarketsInRange(startDate: Date, endDate: Date): Hi
 
 export function getHistoricalMarketCount(): number {
   const database = ensureBacktestDb();
-  const stmt = database.prepare("SELECT COUNT(*) as count FROM historical_markets");
+  const stmt = database.prepare(`SELECT COUNT(*) as count FROM ${backtestTables.historicalMarkets}`);
   const result = stmt.get() as { count: number };
   return result.count;
 }
@@ -754,7 +835,7 @@ export function insertBacktestRun(
 ): number {
   const database = ensureBacktestDb();
   const stmt = database.prepare(`
-    INSERT INTO backtest_runs (name, config_json, markets_tested, created_at, status)
+    INSERT INTO ${backtestTables.backtestRuns} (name, config_json, markets_tested, created_at, status)
     VALUES (?, ?, ?, ?, 'RUNNING')
   `);
   const result = stmt.run(
@@ -772,20 +853,20 @@ export function updateBacktestRunStatus(
 ): void {
   const database = ensureBacktestDb();
   const stmt = database.prepare(`
-    UPDATE backtest_runs SET status = ?, completed_at = ? WHERE id = ?
+    UPDATE ${backtestTables.backtestRuns} SET status = ?, completed_at = ? WHERE id = ?
   `);
   stmt.run(status, new Date().toISOString(), runId);
 }
 
 export function getBacktestRun(runId: number): BacktestRunRow | null {
   const database = ensureBacktestDb();
-  const stmt = database.prepare("SELECT * FROM backtest_runs WHERE id = ?");
+  const stmt = database.prepare(`SELECT * FROM ${backtestTables.backtestRuns} WHERE id = ?`);
   return stmt.get(runId) as BacktestRunRow | null;
 }
 
 export function listBacktestRuns(limit = 20): BacktestRunRow[] {
   const database = ensureBacktestDb();
-  const stmt = database.prepare("SELECT * FROM backtest_runs ORDER BY created_at DESC LIMIT ?");
+  const stmt = database.prepare(`SELECT * FROM ${backtestTables.backtestRuns} ORDER BY created_at DESC LIMIT ?`);
   return stmt.all(limit) as BacktestRunRow[];
 }
 
@@ -828,7 +909,7 @@ export function insertBacktestTrade(
 ): number {
   const database = ensureBacktestDb();
   const stmt = database.prepare(`
-    INSERT INTO backtest_trades
+    INSERT INTO ${backtestTables.backtestTrades}
     (run_id, market_slug, token_id, side, entry_price, exit_price, shares, entry_timestamp, exit_timestamp, exit_reason, pnl, is_ladder_trade, ladder_step_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
@@ -852,16 +933,16 @@ export function insertBacktestTrade(
 
 export function getBacktestTrades(runId: number): BacktestTradeRow[] {
   const database = ensureBacktestDb();
-  const stmt = database.prepare("SELECT * FROM backtest_trades WHERE run_id = ? ORDER BY entry_timestamp ASC");
+  const stmt = database.prepare(`SELECT * FROM ${backtestTables.backtestTrades} WHERE run_id = ? ORDER BY entry_timestamp ASC`);
   return stmt.all(runId) as BacktestTradeRow[];
 }
 
 export function getBacktestTradeStats(runId: number) {
   const database = ensureBacktestDb();
-  const total = database.prepare("SELECT COUNT(*) as count FROM backtest_trades WHERE run_id = ?").get(runId) as { count: number };
-  const wins = database.prepare("SELECT COUNT(*) as count FROM backtest_trades WHERE run_id = ? AND pnl > 0").get(runId) as { count: number };
-  const losses = database.prepare("SELECT COUNT(*) as count FROM backtest_trades WHERE run_id = ? AND pnl <= 0").get(runId) as { count: number };
-  const totalPnl = database.prepare("SELECT COALESCE(SUM(pnl), 0) as total FROM backtest_trades WHERE run_id = ?").get(runId) as { total: number };
+  const total = database.prepare(`SELECT COUNT(*) as count FROM ${backtestTables.backtestTrades} WHERE run_id = ?`).get(runId) as { count: number };
+  const wins = database.prepare(`SELECT COUNT(*) as count FROM ${backtestTables.backtestTrades} WHERE run_id = ? AND pnl > 0`).get(runId) as { count: number };
+  const losses = database.prepare(`SELECT COUNT(*) as count FROM ${backtestTables.backtestTrades} WHERE run_id = ? AND pnl <= 0`).get(runId) as { count: number };
+  const totalPnl = database.prepare(`SELECT COALESCE(SUM(pnl), 0) as total FROM ${backtestTables.backtestTrades} WHERE run_id = ?`).get(runId) as { total: number };
 
   return {
     total: total.count,
@@ -874,14 +955,14 @@ export function getBacktestTradeStats(runId: number) {
 
 export function clearBacktestData(): void {
   const database = ensureBacktestDb();
-  database.run("DELETE FROM backtest_trades");
-  database.run("DELETE FROM backtest_runs");
+  database.run(`DELETE FROM ${backtestTables.backtestTrades}`);
+  database.run(`DELETE FROM ${backtestTables.backtestRuns}`);
   console.log("Backtest runs and trades cleared");
 }
 
 export function clearHistoricalData(): void {
   const database = ensureBacktestDb();
-  database.run("DELETE FROM price_history");
-  database.run("DELETE FROM historical_markets");
+  database.run(`DELETE FROM ${backtestTables.priceHistory}`);
+  database.run(`DELETE FROM ${backtestTables.historicalMarkets}`);
   console.log("Historical market data cleared");
 }

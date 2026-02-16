@@ -1,9 +1,10 @@
 import { Trader, type SignatureType, MIN_ORDER_SIZE } from "./trader";
-import { findEligibleMarkets, fetchBtc15MinMarkets, analyzeMarket, fetchMarketResolution, type EligibleMarket, type Market, type PriceOverride } from "./scanner";
+import { findEligibleMarkets, fetchBtcMarkets, analyzeMarket, fetchMarketResolution, type EligibleMarket, type Market, type PriceOverride } from "./scanner";
 import { insertTrade, closeTrade, getOpenTrades, getLastClosedTrade, getLastWinningTradeInMarket, insertLog, markAsLadderTrade, updateLadderState, getTradeById, updateTradeShares, getLadderMarketLocks, setLadderMarketLock, clearLadderMarketLock, type Trade, type LogLevel } from "./db";
 import { getPriceStream, UserStream, type MarketEvent, type PriceStream, type UserOrderEvent, type UserTradeEvent } from "./websocket";
 import { type ConfigManager, type ConfigChangeEvent, type BotConfig, type LadderModeConfig, type LadderStep } from "./config";
 import { configureClobLimiters } from "./rate-limiter";
+import { getMarketEndDateFromSlug, getMarketTimeframeProfile, parseMarketSlug } from "./market-timeframe";
 
 export type { RiskMode, BotConfig } from "./config";
 export type { LadderState };
@@ -151,11 +152,17 @@ export class Bot {
     const requiresRestart = event.changedPaths.some(path =>
       path.startsWith("trading.paperTrading") ||
       path.startsWith("wallet.signatureType") ||
-      path.startsWith("wallet.funderAddress")
+      path.startsWith("wallet.funderAddress") ||
+      path.startsWith("market.timeframe")
     );
 
     if (requiresRestart) {
       this.log("[CONFIG] Changed setting requires restart to take effect");
+    }
+
+    if (event.changedPaths.includes("market.timeframe")) {
+      this.config.marketTimeframe = prevConfig.marketTimeframe;
+      this.log(`[CONFIG] Ignoring live market timeframe change; restart required`);
     }
 
     // Handle paperBalance changes in paper trading mode
@@ -204,11 +211,8 @@ export class Bot {
     if (trade.market_end_date) {
       return new Date(trade.market_end_date);
     }
-    const match = trade.market_slug.match(/btc-updown-15m-(\d+)/);
-    if (match) {
-      const startTimestamp = parseInt(match[1]) * 1000;
-      return new Date(startTimestamp + 15 * 60 * 1000);
-    }
+    const endDate = getMarketEndDateFromSlug(trade.market_slug);
+    if (endDate) return endDate;
     return new Date(0);
   }
 
@@ -325,7 +329,7 @@ export class Bot {
   async init(): Promise<void> {
     // Fetch initial markets
     try {
-      this.state.markets = await fetchBtc15MinMarkets();
+      this.state.markets = await fetchBtcMarkets(this.config.marketTimeframe);
       if (this.state.markets.length > 0) {
         this.log(`Found ${this.state.markets.length} active markets`);
       }
@@ -687,8 +691,8 @@ export class Bot {
     // Extract market slug from message if not provided in context
     let marketSlug = context?.marketSlug;
     if (!marketSlug) {
-      // Try to extract market slug patterns like "btc-updown-15m-*"
-      const marketMatch = message.match(/(btc-updown-15m-\d+)/);
+      // Try to extract market slug patterns like "btc-updown-5m-*" or "btc-updown-15m-*"
+      const marketMatch = message.match(/(btc-updown-(?:5m|15m)-\d+)/);
       if (marketMatch) {
         marketSlug = marketMatch[1];
       }
@@ -958,6 +962,7 @@ export class Bot {
   }
 
   private handleMarketEvent(event: MarketEvent): void {
+    const timeframeProfile = getMarketTimeframeProfile(this.config.marketTimeframe);
     let slug = event.slug;
     if (!slug && event.marketId) {
       const match = this.state.markets.find(m => m.id === event.marketId);
@@ -966,7 +971,7 @@ export class Bot {
       }
     }
     if (!slug) return;
-    if (!slug.startsWith("btc-updown-15m-")) return;
+    if (!slug.startsWith(`${timeframeProfile.slugPrefix}-`)) return;
 
     const eventType = event.eventType.toLowerCase();
     if (eventType === "market_resolved" || event.winningAssetId) {
@@ -988,11 +993,11 @@ export class Bot {
       if (!event.assetsIds || event.assetsIds.length < 2) return;
       if (this.state.markets.some(m => m.slug === slug)) return;
 
-      const match = slug.match(/btc-updown-15m-(\d+)/);
-      if (!match) return;
+      const parsedSlug = parseMarketSlug(slug);
+      if (!parsedSlug || parsedSlug.timeframe !== this.config.marketTimeframe) return;
 
-      const startTimestamp = parseInt(match[1], 10) * 1000;
-      const endDate = new Date(startTimestamp + 15 * 60 * 1000).toISOString();
+      const startTimestamp = parsedSlug.startTimestampSec * 1000;
+      const endDate = new Date(startTimestamp + timeframeProfile.intervalMs).toISOString();
       const outcomes = event.outcomes && event.outcomes.length >= 2 ? event.outcomes : ["Up", "Down"];
 
       const market: Market = {
@@ -1009,7 +1014,7 @@ export class Bot {
 
       this.state.markets.push(market);
       this.state.markets.sort((a, b) => new Date(a.endDate).getTime() - new Date(b.endDate).getTime());
-      this.log(`[WS] New BTC 15m market: ${slug}`);
+      this.log(`[WS] New BTC ${timeframeProfile.timeframe} market: ${slug}`);
       this.subscribeToMarkets([market]).catch((err) => {
         this.log(`Error subscribing to new market: ${err instanceof Error ? err.message : err}`);
       });
@@ -2519,7 +2524,7 @@ export class Bot {
       const shouldRefresh = !this.lastMarketRefresh ||
         (now.getTime() - this.lastMarketRefresh.getTime()) > this.getMarketRefreshInterval();
       if (shouldRefresh || this.state.markets.length === 0) {
-        this.state.markets = await fetchBtc15MinMarkets();
+        this.state.markets = await fetchBtcMarkets(this.config.marketTimeframe);
         await this.subscribeToMarkets(this.state.markets);
         this.lastMarketRefresh = now;
       }
@@ -2930,7 +2935,7 @@ export class Bot {
                          (now.getTime() - this.lastMarketRefresh.getTime()) > this.getMarketRefreshInterval();
 
     if (shouldRefresh) {
-      this.state.markets = await fetchBtc15MinMarkets();
+      this.state.markets = await fetchBtcMarkets(this.config.marketTimeframe);
       await this.subscribeToMarkets(this.state.markets);
       this.lastMarketRefresh = now;
     }

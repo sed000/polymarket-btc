@@ -4,6 +4,7 @@ import type { BacktestConfig } from "./types";
 import { DEFAULT_BACKTEST_CONFIG } from "./types";
 import { type RiskMode, type ModeConfig, type LadderModeConfig, type LadderStep, getConfigManager } from "../config";
 import { fetchHistoricalDataset, loadCachedDataset, getCacheStats } from "./data-fetcher";
+import { isMarketTimeframe, type MarketTimeframe } from "../market-timeframe";
 import { runBacktest } from "./engine";
 import {
   runOptimization,
@@ -28,7 +29,6 @@ import {
   updateBacktestRunStatus,
   insertBacktestTrade,
   listBacktestRuns,
-  getBacktestTrades,
   clearBacktestData,
   clearHistoricalData,
 } from "../db";
@@ -60,6 +60,7 @@ OPTIONS:
   --window <ms>       Time window in ms (default: 300000)
   --balance <amount>  Starting balance (default: 100)
   --mode <mode>       Risk mode: normal | ladder
+  --market <tf>       Market timeframe: 5m | 15m
   --quick             Use quick optimization (fewer combinations)
   --force             Force re-fetch data even if cached
   --export <file>     Export results to file (csv or json)
@@ -80,7 +81,7 @@ EXAMPLES:
   bun run src/backtest/index.ts run --entry 0.90 --stop 0.60 --days 14
 
   # Fetch historical data
-  bun run src/backtest/index.ts fetch --days 30
+  bun run src/backtest/index.ts fetch --days 30 --market 5m
 
   # Run parameter optimization (grid search)
   bun run src/backtest/index.ts optimize --days 14
@@ -109,6 +110,7 @@ function parseArguments() {
       window: { type: "string" },
       balance: { type: "string" },
       mode: { type: "string" },
+      market: { type: "string" },
       quick: { type: "boolean", default: false },
       force: { type: "boolean", default: false },
       export: { type: "string" },
@@ -161,6 +163,7 @@ function getConfigFromFile(modeOverride?: string) {
       compoundLimit: profitTaking.compoundLimit,
       baseBalance: profitTaking.baseBalance,
       ladderSteps: mode.steps,
+      marketTimeframe: backtestConfig.marketTimeframe,
     };
   }
 
@@ -178,7 +181,17 @@ function getConfigFromFile(modeOverride?: string) {
     compoundLimit: profitTaking.compoundLimit,
     baseBalance: profitTaking.baseBalance,
     ladderSteps: [],
+    marketTimeframe: backtestConfig.marketTimeframe,
   };
+}
+
+function resolveMarketTimeframe(args: ReturnType<typeof parseArguments>["values"]): MarketTimeframe {
+  const configured = getConfigManager().getBacktestMarketTimeframe();
+  const requested = args.market ?? configured;
+  if (!isMarketTimeframe(requested)) {
+    throw new Error(`Invalid --market value "${requested}". Expected "5m" or "15m".`);
+  }
+  return requested;
 }
 
 // Calculate date range
@@ -194,13 +207,18 @@ function getDateRange(args: ReturnType<typeof parseArguments>["values"]): { star
 }
 
 // Load cached data or fetch from API
-async function loadOrFetchMarkets(startDate: Date, endDate: Date): Promise<ReturnType<typeof loadCachedDataset> | null> {
+async function loadOrFetchMarkets(
+  startDate: Date,
+  endDate: Date,
+  marketTimeframe: MarketTimeframe
+): Promise<Awaited<ReturnType<typeof loadCachedDataset>> | null> {
   console.log("Loading historical data...");
-  let markets = await loadCachedDataset(startDate, endDate);
+  let markets = await loadCachedDataset(startDate, endDate, marketTimeframe);
 
   if (markets.length === 0) {
     console.log("\nNo cached data found. Fetching from API...");
     markets = await fetchHistoricalDataset(startDate, endDate, {
+      marketTimeframe,
       onProgress: (p) => printProgress(p.current, p.total),
     });
     clearProgress();
@@ -236,6 +254,9 @@ function validateBacktestConfig(config: BacktestConfig): void {
   }
   if (config.startingBalance <= 0) {
     errors.push(`startingBalance must be positive (got ${config.startingBalance})`);
+  }
+  if (!isMarketTimeframe(config.marketTimeframe)) {
+    errors.push(`marketTimeframe must be "5m" or "15m" (got ${config.marketTimeframe})`);
   }
 
   if (config.entryThreshold >= config.maxEntryPrice) {
@@ -350,7 +371,12 @@ function validateLadderSteps(steps?: LadderStep[]): string[] {
 }
 
 // Build config from arguments (config file is the base, CLI args override)
-function buildConfig(args: ReturnType<typeof parseArguments>["values"], startDate: Date, endDate: Date): BacktestConfig {
+function buildConfig(
+  args: ReturnType<typeof parseArguments>["values"],
+  startDate: Date,
+  endDate: Date,
+  marketTimeframe: MarketTimeframe
+): BacktestConfig {
   const defaultFileConfig = getConfigFromFile();
   const mode = (args.mode || defaultFileConfig.mode) as RiskMode;
   const fileConfig = getConfigFromFile(mode);
@@ -379,6 +405,7 @@ function buildConfig(args: ReturnType<typeof parseArguments>["values"], startDat
     compoundLimit: fileConfig.compoundLimit,
     baseBalance: fileConfig.baseBalance,
     riskMode,
+    marketTimeframe,
     ladderSteps: isLadder ? fileConfig.ladderSteps ?? [] : [],
     startDate,
     endDate,
@@ -393,15 +420,16 @@ function buildConfig(args: ReturnType<typeof parseArguments>["values"], startDat
 // Command: run
 async function commandRun(args: ReturnType<typeof parseArguments>["values"]) {
   const { startDate, endDate } = getDateRange(args);
-  const config = buildConfig(args, startDate, endDate);
+  const marketTimeframe = resolveMarketTimeframe(args);
+  const config = buildConfig(args, startDate, endDate, marketTimeframe);
 
-  const markets = await loadOrFetchMarkets(startDate, endDate);
+  const markets = await loadOrFetchMarkets(startDate, endDate, marketTimeframe);
   if (!markets) return;
 
-  console.log(`\nRunning backtest on ${markets.length} markets...`);
+  console.log(`\nRunning ${marketTimeframe} backtest on ${markets.length} markets...`);
 
   // Run backtest
-  initBacktestDatabase();
+  initBacktestDatabase(marketTimeframe);
   const result = runBacktest(config, markets);
 
   // Save to database
@@ -435,10 +463,12 @@ async function commandRun(args: ReturnType<typeof parseArguments>["values"]) {
 // Command: fetch
 async function commandFetch(args: ReturnType<typeof parseArguments>["values"]) {
   const { startDate, endDate } = getDateRange(args);
+  const marketTimeframe = resolveMarketTimeframe(args);
 
-  console.log(`Fetching historical data from ${startDate.toISOString().slice(0, 10)} to ${endDate.toISOString().slice(0, 10)}...`);
+  console.log(`Fetching ${marketTimeframe} historical data from ${startDate.toISOString().slice(0, 10)} to ${endDate.toISOString().slice(0, 10)}...`);
 
   const markets = await fetchHistoricalDataset(startDate, endDate, {
+    marketTimeframe,
     forceRefetch: args.force,
     onProgress: (p) => {
       printProgress(p.current, p.total);
@@ -452,12 +482,13 @@ async function commandFetch(args: ReturnType<typeof parseArguments>["values"]) {
 // Command: optimize
 async function commandOptimize(args: ReturnType<typeof parseArguments>["values"]) {
   const { startDate, endDate } = getDateRange(args);
-  const baseConfig = buildConfig(args, startDate, endDate);
+  const marketTimeframe = resolveMarketTimeframe(args);
+  const baseConfig = buildConfig(args, startDate, endDate, marketTimeframe);
 
-  const markets = await loadOrFetchMarkets(startDate, endDate);
+  const markets = await loadOrFetchMarkets(startDate, endDate, marketTimeframe);
   if (!markets) return;
 
-  console.log(`\nOptimizing on ${markets.length} markets...`);
+  console.log(`\nOptimizing ${marketTimeframe} on ${markets.length} markets...`);
 
   const ranges =
     baseConfig.riskMode === "ladder"
@@ -490,12 +521,13 @@ async function commandOptimize(args: ReturnType<typeof parseArguments>["values"]
 // Command: genetic
 async function commandGenetic(args: ReturnType<typeof parseArguments>["values"]) {
   const { startDate, endDate } = getDateRange(args);
-  const baseConfig = buildConfig(args, startDate, endDate);
+  const marketTimeframe = resolveMarketTimeframe(args);
+  const baseConfig = buildConfig(args, startDate, endDate, marketTimeframe);
 
-  const markets = await loadOrFetchMarkets(startDate, endDate);
+  const markets = await loadOrFetchMarkets(startDate, endDate, marketTimeframe);
   if (!markets) return;
 
-  console.log(`\nRunning genetic optimization on ${markets.length} markets...`);
+  console.log(`\nRunning genetic optimization on ${marketTimeframe} (${markets.length} markets)...`);
 
   // Build GA config from args
   const gaConfig = {
@@ -539,7 +571,8 @@ async function commandGenetic(args: ReturnType<typeof parseArguments>["values"])
 
 // Command: history
 async function commandHistory(args: ReturnType<typeof parseArguments>["values"]) {
-  initBacktestDatabase();
+  const marketTimeframe = resolveMarketTimeframe(args);
+  initBacktestDatabase(marketTimeframe);
 
   const runs = listBacktestRuns(parseInt(args.limit || "20", 10));
 
@@ -548,14 +581,14 @@ async function commandHistory(args: ReturnType<typeof parseArguments>["values"])
     return;
   }
 
-  console.log("\n=== BACKTEST HISTORY ===\n");
+  console.log(`\n=== BACKTEST HISTORY (${marketTimeframe}) ===\n`);
   console.log("ID   | Date       | Markets | Status    | Config");
   console.log("-----+------------+---------+-----------+----------------------------------------");
 
   for (const run of runs) {
     const config = JSON.parse(run.config_json);
     const date = run.created_at.slice(0, 10);
-    const configSummary = `entry=$${config.entryThreshold}, stop=$${config.stopLoss}, ${config.riskMode}`;
+    const configSummary = `tf=${config.marketTimeframe || marketTimeframe}, entry=$${config.entryThreshold}, stop=$${config.stopLoss}, ${config.riskMode}`;
 
     console.log(
       `${run.id.toString().padStart(4)} | ${date} | ${run.markets_tested.toString().padStart(7)} | ${run.status.padEnd(9)} | ${configSummary}`
@@ -566,12 +599,13 @@ async function commandHistory(args: ReturnType<typeof parseArguments>["values"])
 }
 
 // Command: stats
-async function commandStats() {
-  initBacktestDatabase();
+async function commandStats(args: ReturnType<typeof parseArguments>["values"]) {
+  const marketTimeframe = resolveMarketTimeframe(args);
+  initBacktestDatabase(marketTimeframe);
 
-  const stats = getCacheStats();
+  const stats = getCacheStats(marketTimeframe);
 
-  console.log("\n=== CACHE STATISTICS ===\n");
+  console.log(`\n=== CACHE STATISTICS (${marketTimeframe}) ===\n`);
   console.log(`Total Markets Cached: ${stats.totalMarkets}`);
   console.log(`Total Price Ticks: ${stats.totalPriceTicks}`);
 
@@ -586,15 +620,16 @@ async function commandStats() {
 
 // Command: clear
 async function commandClear(args: ReturnType<typeof parseArguments>["values"]) {
-  initBacktestDatabase();
+  const marketTimeframe = resolveMarketTimeframe(args);
+  initBacktestDatabase(marketTimeframe);
 
   if (args.force) {
     clearHistoricalData();
     clearBacktestData();
-    console.log("All backtest and historical data cleared.");
+    console.log(`All ${marketTimeframe} backtest and historical data cleared.`);
   } else {
     clearBacktestData();
-    console.log("Backtest runs cleared. Use --force to also clear historical market data.");
+    console.log(`${marketTimeframe} backtest runs cleared. Use --force to also clear historical market data.`);
   }
 }
 
@@ -626,7 +661,7 @@ async function main() {
         await commandHistory(args);
         break;
       case "stats":
-        await commandStats();
+        await commandStats(args);
         break;
       case "clear":
         await commandClear(args);

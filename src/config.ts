@@ -1,6 +1,7 @@
 import { watch, existsSync, readFileSync, writeFileSync } from "fs";
 import { EventEmitter } from "events";
 import type { SignatureType } from "./trader";
+import { isMarketTimeframe, type MarketTimeframe } from "./market-timeframe";
 
 // Mode-specific trading parameters (for normal mode)
 export interface ModeConfig {
@@ -49,6 +50,9 @@ export interface TradingConfigFile {
     maxPositions: number;
     pollIntervalMs: number;
   };
+  market: {
+    timeframe: MarketTimeframe;
+  };
   wallet: {
     signatureType: SignatureType;
     funderAddress: string | null;
@@ -63,6 +67,7 @@ export interface TradingConfigFile {
   };
   backtest: {
     mode: string;
+    marketTimeframe: MarketTimeframe;
     startingBalance: number;
     days: number;
     slippage: number;
@@ -86,6 +91,9 @@ const DEFAULT_CONFIG: TradingConfigFile = {
     maxPositions: 1,
     pollIntervalMs: 10000,
   },
+  market: {
+    timeframe: "5m",
+  },
   wallet: {
     signatureType: 0,
     funderAddress: null,
@@ -107,6 +115,7 @@ const DEFAULT_CONFIG: TradingConfigFile = {
   },
   backtest: {
     mode: "normal",
+    marketTimeframe: "5m",
     startingBalance: 100,
     days: 7,
     slippage: 0.001,
@@ -287,6 +296,11 @@ function validateConfig(config: TradingConfigFile): ValidationError[] {
     errors.push({ path: "trading.pollIntervalMs", message: "must be at least 1000ms" });
   }
 
+  // Market section
+  if (!isMarketTimeframe(config.market.timeframe)) {
+    errors.push({ path: "market.timeframe", message: 'must be "5m" or "15m"' });
+  }
+
   // Wallet section
   const validSigTypes: SignatureType[] = [0, 1, 2];
   if (!validSigTypes.includes(config.wallet.signatureType)) {
@@ -321,6 +335,9 @@ function validateConfig(config: TradingConfigFile): ValidationError[] {
   // Backtest section
   if (!config.modes[config.backtest.mode]) {
     errors.push({ path: "backtest.mode", message: `mode "${config.backtest.mode}" not found in modes` });
+  }
+  if (!isMarketTimeframe(config.backtest.marketTimeframe)) {
+    errors.push({ path: "backtest.marketTimeframe", message: 'must be "5m" or "15m"' });
   }
   if (config.backtest.startingBalance <= 0) {
     errors.push({ path: "backtest.startingBalance", message: "must be positive" });
@@ -412,6 +429,7 @@ export interface BotConfig {
   signatureType: SignatureType;
   funderAddress?: string;
   maxPositions: number;
+  marketTimeframe: MarketTimeframe;
 }
 
 export class ConfigManager extends EventEmitter {
@@ -644,6 +662,7 @@ export class ConfigManager extends EventEmitter {
       signatureType: this.config.wallet.signatureType,
       funderAddress: this.config.wallet.funderAddress || undefined,
       maxPositions: this.config.trading.maxPositions,
+      marketTimeframe: this.config.market.timeframe,
     };
   }
 
@@ -675,10 +694,24 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Get market timeframe for live trading
+   */
+  getMarketTimeframe(): MarketTimeframe {
+    return this.config.market.timeframe;
+  }
+
+  /**
    * Get backtest configuration
    */
   getBacktestConfig(): TradingConfigFile["backtest"] {
     return this.config.backtest;
+  }
+
+  /**
+   * Get backtest market timeframe default
+   */
+  getBacktestMarketTimeframe(): MarketTimeframe {
+    return this.config.backtest.marketTimeframe;
   }
 
   /**

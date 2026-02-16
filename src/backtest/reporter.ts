@@ -52,6 +52,7 @@ export function printBacktestReport(result: BacktestResult): void {
 
   // Period
   console.log(`\nPeriod: ${formatDate(result.config.startDate)} to ${formatDate(result.config.endDate)}`);
+  console.log(`Market Timeframe: ${result.config.marketTimeframe}`);
   console.log(`Starting Balance: ${formatCurrency(result.config.startingBalance)}`);
   console.log(`Risk Mode: ${result.config.riskMode}`);
   if (result.config.compoundLimit > 0) {
